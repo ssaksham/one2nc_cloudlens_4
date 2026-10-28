@@ -9,9 +9,9 @@ authors = [{ name = "Your Name" }]  # FELLOW, required: replace Your Name with y
 keywords = []  # FELLOW, required: a few short topic words, for example ["cli", "parsing"]
 [metadata]
 ext_id = ""  # LOCKED: stays empty, issued at packaging time
-task_id = ""  # LOCKED: the task id, set at seeding
+task_id = "bc590ad2-0f0d-482b-b07f-9e8014f2dd68"  # LOCKED: the task id, set at seeding
 hai_difficulty = "medium"  # LOCKED: easy, medium or hard, set at seeding
-annotator_id = ""  # FELLOW: your annotator id
+annotator_id = "f3adb1e4-ef0a-4405-96d6-7e049d1c261d"  # FELLOW: your annotator id
 display_title = ""  # FELLOW, required: a short plain title for the task, not the repository name
 display_description = ""  # FELLOW, required: one plain sentence describing the task for a reader
 original_title = "Profiles from both AWS files and the profile's own region"  # the seed idea's title, set at seeding: keep it
