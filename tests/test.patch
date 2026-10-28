@@ -298,10 +298,10 @@ index 0000000..9dac039
 +}
 diff --git a/internal/view/profile_selection_test.go b/internal/view/profile_selection_test.go
 new file mode 100644
-index 0000000..1c07ffb
+index 0000000..17d8f57
 --- /dev/null
 +++ b/internal/view/profile_selection_test.go
-@@ -0,0 +1,429 @@
+@@ -0,0 +1,534 @@
 +package view
 +
 +import (
@@ -415,36 +415,165 @@ index 0000000..1c07ffb
 +	return a
 +}
 +
-+func requireProfileState(t *testing.T, a *App, profile, region, key string) {
-+	t.Helper()
-+	requireSortedRegionOptions(t, a)
++type profileSelectionState struct {
++	profile, region         interface{}
++	profileText, regionText string
++	session                 awsSDK.Config
++}
++
++func profileSelectionSnapshot(a *App) (profileSelectionState, error) {
 +	ctx := a.GetContext()
-+	if got := ctx.Value(internal.KeyActiveProfile); got != profile {
-+		t.Errorf("active profile = %v, want %q", got, profile)
++	state := profileSelectionState{
++		profile: ctx.Value(internal.KeyActiveProfile),
++		region:  ctx.Value(internal.KeyActiveRegion),
 +	}
-+	if got := ctx.Value(internal.KeyActiveRegion); got != region {
-+		t.Errorf("active region = %v, want %q", got, region)
-+	}
-+	for name, want := range map[string]string{"profile": profile, "region": region} {
-+		dropdown, ok := a.Views()[name].(*ui.DropDown)
-+		if !ok {
-+			t.Fatalf("missing %s dropdown", name)
-+		}
-+		if _, got := dropdown.GetCurrentOption(); got != want {
-+			t.Errorf("%s dropdown = %q, want %q", name, got, want)
-+		}
-+	}
-+	session, ok := ctx.Value(internal.KeySession).(awsSDK.Config)
++	profile, ok := a.Views()["profile"].(*ui.DropDown)
 +	if !ok {
-+		t.Fatalf("missing AWS SDK session")
++		return state, fmt.Errorf("missing profile dropdown")
 +	}
-+	if session.Region != region {
-+		t.Errorf("SDK region = %q, want %q", session.Region, region)
++	region, ok := a.Views()["region"].(*ui.DropDown)
++	if !ok {
++		return state, fmt.Errorf("missing region dropdown")
 +	}
-+	credentials, err := session.Credentials.Retrieve(context.Background())
++	_, state.profileText = profile.GetCurrentOption()
++	_, state.regionText = region.GetCurrentOption()
++	state.session, ok = ctx.Value(internal.KeySession).(awsSDK.Config)
++	if !ok {
++		return state, fmt.Errorf("missing AWS SDK session")
++	}
++	return state, nil
++}
++
++func requireProfileSnapshot(t *testing.T, state profileSelectionState, profile, region, key string) {
++	t.Helper()
++	if state.profile != profile {
++		t.Errorf("active profile = %v, want %q", state.profile, profile)
++	}
++	if state.region != region {
++		t.Errorf("active region = %v, want %q", state.region, region)
++	}
++	if state.profileText != profile {
++		t.Errorf("profile dropdown = %q, want %q", state.profileText, profile)
++	}
++	if state.regionText != region {
++		t.Errorf("region dropdown = %q, want %q", state.regionText, region)
++	}
++	if state.session.Region != region {
++		t.Errorf("SDK region = %q, want %q", state.session.Region, region)
++	}
++	credentials, err := state.session.Credentials.Retrieve(context.Background())
 +	if err != nil || credentials.AccessKeyID != key {
 +		t.Errorf("SDK credentials = %q, %v; want %q", credentials.AccessKeyID, err, key)
 +	}
++}
++
++func requireProfileState(t *testing.T, a *App, profile, region, key string) {
++	t.Helper()
++	requireSortedRegionOptions(t, a)
++	state, err := profileSelectionSnapshot(a)
++	if err != nil {
++		t.Fatal(err)
++	}
++	requireProfileSnapshot(t, state, profile, region, key)
++}
++
++// Run the real event loop so errors delivered by QueueUpdateDraw reach the
++// screen just as they do in the terminal. No particular error widget is assumed.
++func startProfileEventLoop(t *testing.T, a *App) (func(func() error), func() []string) {
++	t.Helper()
++	screen := tcell.NewSimulationScreen("UTF-8")
++	if err := screen.Init(); err != nil {
++		t.Fatal(err)
++	}
++	screen.SetSize(160, 48)
++	a.Application.SetScreen(screen)
++	var rendered []string
++	a.Application.SetAfterDrawFunc(func(screen tcell.Screen) {
++		width, height := screen.Size()
++		lines := make([]string, height)
++		for y := 0; y < height; y++ {
++			var line strings.Builder
++			for x := 0; x < width; x++ {
++				char, _, _, _ := screen.GetContent(x, y)
++				line.WriteRune(char)
++			}
++			lines[y] = strings.TrimSpace(line.String())
++		}
++		rendered = lines
++	})
++	stopped := make(chan struct{})
++	var runErr error
++	go func() {
++		runErr = a.Application.Run()
++		close(stopped)
++	}()
++	t.Cleanup(func() {
++		a.Application.Stop()
++		select {
++		case <-stopped:
++			if runErr != nil {
++				t.Errorf("UI event loop: %v", runErr)
++			}
++		case <-time.After(2 * time.Second):
++			t.Error("UI event loop did not stop")
++		}
++	})
++	update := func(action func() error) {
++		t.Helper()
++		completed := make(chan error, 1)
++		go func() {
++			var err error
++			a.Application.QueueUpdateDraw(func() { err = action() })
++			completed <- err
++		}()
++		select {
++		case err := <-completed:
++			if err != nil {
++				t.Fatal(err)
++			}
++		case <-stopped:
++			t.Fatalf("UI event loop stopped: %v", runErr)
++		case <-time.After(2 * time.Second):
++			t.Fatal("UI event loop did not process update")
++		}
++	}
++	update(func() error { return nil })
++	snapshot := func() []string {
++		var lines []string
++		update(func() error {
++			lines = append([]string(nil), rendered...)
++			return nil
++		})
++		return lines
++	}
++	return update, snapshot
++}
++
++func selectProfileOptionOnUI(a *App, dropdown, value string) error {
++	d, ok := a.Views()[dropdown].(*ui.DropDown)
++	if !ok {
++		return fmt.Errorf("missing %s dropdown", dropdown)
++	}
++	var list *tview.List
++	setFocus := func(p tview.Primitive) {
++		if candidate, ok := p.(*tview.List); ok {
++			list = candidate
++		}
++		a.Application.SetFocus(p)
++	}
++	a.Application.SetFocus(d)
++	d.InputHandler()(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone), setFocus)
++	if list == nil {
++		return fmt.Errorf("%s dropdown did not open", dropdown)
++	}
++	for index := 0; index < list.GetItemCount(); index++ {
++		if text, _ := list.GetItemText(index); strings.TrimSpace(text) == value {
++			list.SetCurrentItem(index)
++			list.InputHandler()(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone), setFocus)
++			return nil
++		}
++	}
++	return fmt.Errorf("%s dropdown lacks %q", dropdown, value)
 +}
 +
 +func openProfileOptions(t *testing.T, a *App, dropdown string) *tview.List {
@@ -633,17 +762,7 @@ index 0000000..1c07ffb
 +			isolatedProfileCase(t, func() {
 +				f := profileFiles(t, profileKeys("first", "second"), "[profile first]\nregion=us-east-1\n[profile second]\nregion=eu-west-2\n")
 +				a := startProfileApp(t, "first", "")
-+				var flash *ui.Flash
-+				layout := a.Main.GetPrimitive(internal.AWS_SCREEN).(*tview.Flex)
-+				for i := 0; layout.ItemAt(i) != nil; i++ {
-+					if candidate, ok := layout.ItemAt(i).(*ui.Flash); ok {
-+						flash = candidate
-+					}
-+				}
-+				if flash != nil {
-+					flash.SetTestMode(true)
-+					flash.SetText("")
-+				}
++				update, renderLines := startProfileEventLoop(t, a)
 +				dropdown, value := "profile", "second"
 +				switch failure {
 +				case "profile_region":
@@ -661,33 +780,18 @@ index 0000000..1c07ffb
 +				if failure == "region_credentials" {
 +					wantError = "first"
 +				}
-+				screen := tcell.NewSimulationScreen("UTF-8")
-+				if err := screen.Init(); err != nil {
-+					t.Fatal(err)
-+				}
-+				defer screen.Fini()
-+				screen.SetSize(160, 48)
-+				a.Main.SetRect(0, 0, 160, 48)
-+				renderLines := func() []string {
-+					screen.Clear()
-+					a.Main.Draw(screen)
-+					lines := make([]string, 48)
-+					for y := 0; y < 48; y++ {
-+						var line strings.Builder
-+						for x := 0; x < 160; x++ {
-+							char, _, _, _ := screen.GetContent(x, y)
-+							line.WriteRune(char)
-+						}
-+						lines[y] = strings.TrimSpace(line.String())
-+					}
-+					return lines
-+				}
 +				before := map[string]bool{}
 +				for _, line := range renderLines() {
 +					before[line] = true
 +				}
-+				selectProfileOption(t, a, dropdown, value)
-+				requireProfileState(t, a, "first", "us-east-1", "firstKEY")
++				update(func() error { return selectProfileOptionOnUI(a, dropdown, value) })
++				var state profileSelectionState
++				update(func() error {
++					var err error
++					state, err = profileSelectionSnapshot(a)
++					return err
++				})
++				requireProfileSnapshot(t, state, "first", "us-east-1", "firstKEY")
 +				shown := false
 +				deadline := time.Now().Add(time.Second)
 +				for time.Now().Before(deadline) {
@@ -717,6 +821,7 @@ index 0000000..1c07ffb
 +				endpoint := os.Getenv("AWS_ENDPOINT_URL")
 +				t.Setenv(internal.LOCALSTACK_PORT, endpoint[strings.LastIndex(endpoint, ":")+1:])
 +				t.Setenv("AWS_REGION", "eu-west-1")
++				t.Setenv("AWS_DEFAULT_REGION", "us-east-2")
 +				a := NewApp()
 +				t.Cleanup(func() { a.Content.Stack.Clear() })
 +				if err := a.Init("test", config.CloudConfig{SelectedCloud: internal.AWS, AWSConfig: config.AWSConfig{UseLocalStack: true, Region: region}}); err != nil {
