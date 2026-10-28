@@ -77,10 +77,10 @@ index 0000000..0423787
 +}
 diff --git a/internal/aws/profile_discovery_test.go b/internal/aws/profile_discovery_test.go
 new file mode 100644
-index 0000000..9dac039
+index 0000000..c61d4b7
 --- /dev/null
 +++ b/internal/aws/profile_discovery_test.go
-@@ -0,0 +1,215 @@
+@@ -0,0 +1,232 @@
 +package aws
 +
 +import (
@@ -296,12 +296,482 @@ index 0000000..9dac039
 +		seen[region] = true
 +	}
 +}
++
++func TestGetProfilesDoesNotExecuteCredentialProcess(t *testing.T) {
++	credentials, config := profileDiscoveryPaths(t)
++	marker := filepath.Join(t.TempDir(), "credentials-were-executed")
++	helper := filepath.Join(t.TempDir(), "credentials-helper")
++	// The command would leave evidence even if its credential output were ignored.
++	script := "#!/bin/sh\nprintf invoked > '" + marker + "'\nprintf '%s' '{\"Version\":1,\"AccessKeyId\":\"PROCESSKEY\",\"SecretAccessKey\":\"secret\"}'\n"
++	if err := os.WriteFile(helper, []byte(script), 0700); err != nil {
++		t.Fatal(err)
++	}
++	writeProfileDiscoveryFile(t, credentials, "[source]\naws_access_key_id=source\naws_secret_access_key=secret\n")
++	writeProfileDiscoveryFile(t, config, "[profile external]\ncredential_process="+helper+"\nregion=us-east-1\n")
++	expectDiscoveredProfiles(t, "external", "source")
++	if _, err := os.Stat(marker); !os.IsNotExist(err) {
++		t.Fatalf("profile discovery executed a credentials provider: %v", err)
++	}
++}
+diff --git a/internal/view/profile_async_selection_test.go b/internal/view/profile_async_selection_test.go
+new file mode 100644
+index 0000000..2b0c0e4
+--- /dev/null
++++ b/internal/view/profile_async_selection_test.go
+@@ -0,0 +1,447 @@
++package view
++
++import (
++	"context"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++	"unicode"
++
++	"github.com/derailed/tview"
++	"github.com/gdamore/tcell/v2"
++	"github.com/one2nc/cloudlens/internal/ui"
++)
++
++type profileRequest struct{ key, region, token string }
++
++type profileRequestLog struct {
++	mu       sync.Mutex
++	requests []profileRequest
++}
++
++func (l *profileRequestLog) record(r *http.Request) {
++	if r.Form.Get("Action") != "DescribeInstances" {
++		return
++	}
++	var key, region string
++	if _, after, ok := strings.Cut(r.Header.Get("Authorization"), "Credential="); ok {
++		parts := strings.Split(strings.Fields(after)[0], "/")
++		if len(parts) >= 4 {
++			key, region = parts[0], parts[2]
++		}
++	}
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	l.requests = append(l.requests, profileRequest{key, region, r.Header.Get("X-Amz-Security-Token")})
++}
++
++func (l *profileRequestLog) mark() int {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	return len(l.requests)
++}
++
++func (l *profileRequestLog) since(mark int) []profileRequest {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	return append([]profileRequest(nil), l.requests[mark:]...)
++}
++
++func requireSignedProfileRequest(t *testing.T, log *profileRequestLog, mark int, key, region, token string) {
++	t.Helper()
++	deadline := time.NewTimer(3 * time.Second)
++	defer deadline.Stop()
++	ticker := time.NewTicker(time.Millisecond)
++	defer ticker.Stop()
++	for {
++		for _, request := range log.since(mark) {
++			if request == (profileRequest{key, region, token}) {
++				return
++			}
++		}
++		select {
++		case <-deadline.C:
++			t.Fatalf("no EC2 request used key %q, signing region %q, token %q; observed %+v", key, region, token, log.since(mark))
++		case <-ticker.C:
++		}
++	}
++}
++
++func snapshotProfileOnUI(t *testing.T, a *App, update func(func() error)) profileSelectionState {
++	t.Helper()
++	var state profileSelectionState
++	update(func() error { var err error; state, err = profileSelectionSnapshot(a); return err })
++	return state
++}
++
++func awaitProfileSelection(t *testing.T, a *App, update func(func() error), profile, region, key string) {
++	t.Helper()
++	deadline := time.NewTimer(3 * time.Second)
++	defer deadline.Stop()
++	ticker := time.NewTicker(time.Millisecond)
++	defer ticker.Stop()
++	for {
++		state := snapshotProfileOnUI(t, a, update)
++		if state.profile == profile && state.region == region && state.profileText == profile && state.regionText == region && state.session.Region == region {
++			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
++			credentials, err := state.session.Credentials.Retrieve(ctx)
++			cancel()
++			if err == nil && credentials.AccessKeyID == key {
++				requireProfileSnapshot(t, state, profile, region, key)
++				return
++			}
++		}
++		select {
++		case <-deadline.C:
++			t.Fatalf("selection did not settle on %s/%s; got profile=%v region=%v controls=%q/%q session region=%q", profile, region, state.profile, state.region, state.profileText, state.regionText, state.session.Region)
++		case <-ticker.C:
++		}
++	}
++}
++
++func selectAndAwaitProfile(t *testing.T, a *App, update func(func() error), log *profileRequestLog, dropdown, value, profile, region, key, token string) {
++	t.Helper()
++	mark := log.mark()
++	update(func() error { return selectProfileOptionOnUI(a, dropdown, value) })
++	awaitProfileSelection(t, a, update, profile, region, key)
++	update(func() error { requireSortedRegionOptions(t, a); return nil })
++	requireSignedProfileRequest(t, log, mark, key, region, token)
++}
++
++// Screen wrapping may divide an identifier across several lines. Ignore spaces
++// and decorative borders while comparing only lines changed by the operation.
++func normalizedProfileText(text string) string {
++	return strings.Map(func(r rune) rune {
++		if unicode.IsLetter(r) || unicode.IsNumber(r) {
++			return unicode.ToLower(r)
++		}
++		return -1
++	}, text)
++}
++
++func newProfileText(lines []string, before map[string]bool, value string) bool {
++	var changed strings.Builder
++	for _, line := range lines {
++		if !before[line] {
++			changed.WriteString(line)
++		}
++	}
++	return strings.Contains(normalizedProfileText(changed.String()), normalizedProfileText(value))
++}
++
++func profileRenderBaseline(render func() []string) map[string]bool {
++	before := map[string]bool{}
++	for _, line := range render() {
++		before[line] = true
++	}
++	return before
++}
++
++func awaitProfileError(t *testing.T, render func() []string, before map[string]bool, value string) {
++	t.Helper()
++	deadline := time.NewTimer(3 * time.Second)
++	defer deadline.Stop()
++	ticker := time.NewTicker(time.Millisecond)
++	defer ticker.Stop()
++	for {
++		if newProfileText(render(), before, value) {
++			return
++		}
++		select {
++		case <-deadline.C:
++			t.Fatalf("failed change did not display an error identifying %q", value)
++		case <-ticker.C:
++		}
++	}
++}
++
++// Dismiss a modal through its focused button. A non-modal error needs no action.
++// Both page owners are legitimate places to display cloudlens errors.
++func dismissProfileError(a *App) {
++	for _, pages := range []*ui.Pages{a.Main, a.Content.Pages} {
++		_, primitive := pages.GetFrontPage()
++		switch primitive.(type) {
++		case *tview.ModalForm, *tview.Modal:
++			a.Application.SetFocus(primitive)
++			focused := a.Application.GetFocus()
++			if focused != nil && focused.InputHandler() != nil {
++				focused.InputHandler()(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone), func(p tview.Primitive) { a.Application.SetFocus(p) })
++			}
++		}
++	}
++}
++
++type profileRoleGate struct {
++	started, release, finished         chan struct{}
++	startOnce, releaseOnce, finishOnce sync.Once
++	fail                               bool
++}
++
++func newProfileRoleGate(fail bool) *profileRoleGate {
++	return &profileRoleGate{started: make(chan struct{}), release: make(chan struct{}), finished: make(chan struct{}), fail: fail}
++}
++
++func (g *profileRoleGate) open() { g.releaseOnce.Do(func() { close(g.release) }) }
++
++func awaitProfileSignal(t *testing.T, signal <-chan struct{}, what string) {
++	t.Helper()
++	select {
++	case <-signal:
++	case <-time.After(3 * time.Second):
++		t.Fatalf("timed out waiting for %s", what)
++	}
++}
++
++func asyncProfileFixture(t *testing.T, gates map[string]*profileRoleGate) profileFixture {
++	t.Helper()
++	credentials := profileKeys("first", "second", "source")
++	// Temporary credentials must reach the actual service request, too.
++	credentials = strings.Replace(credentials, "[first]\n", "[first]\naws_session_token=firstTOKEN\n", 1)
++	credentials = strings.Replace(credentials, "[second]\n", "[second]\naws_session_token=secondTOKEN\n", 1)
++	configuration := "[profile first]\nregion=us-east-1\n[profile second]\nregion=eu-central-2\n[profile invalid]\nregion=moon-central-1\n"
++	configured := map[string]bool{}
++	for name := range gates {
++		role := strings.SplitN(name, "@", 2)[0]
++		if configured[role] {
++			continue
++		}
++		configured[role] = true
++		configuration += fmt.Sprintf("[profile %s]\nrole_arn=arn:aws:iam::123456789012:role/%s\nsource_profile=source\nregion=eu-west-2\n", role, role)
++	}
++	f := profileFiles(t, credentials, configuration)
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		_ = r.ParseForm()
++		w.Header().Set("Content-Type", "text/xml")
++		if r.Form.Get("Action") == "AssumeRole" {
++			role := strings.TrimPrefix(r.Form.Get("RoleArn"), "arn:aws:iam::123456789012:role/")
++			gate := gates[role]
++			if _, scope, ok := strings.Cut(r.Header.Get("Authorization"), "Credential="); ok {
++				parts := strings.Split(strings.Fields(scope)[0], "/")
++				if len(parts) >= 4 && gates[role+"@"+parts[2]] != nil {
++					gate = gates[role+"@"+parts[2]]
++				}
++			}
++			if gate == nil {
++				http.Error(w, "unexpected role", http.StatusBadRequest)
++				return
++			}
++			if !strings.Contains(r.Header.Get("Authorization"), "Credential=sourceKEY/") {
++				http.Error(w, "incorrect source profile", http.StatusForbidden)
++				return
++			}
++			gate.startOnce.Do(func() { close(gate.started) })
++			defer gate.finishOnce.Do(func() { close(gate.finished) })
++			select {
++			case <-gate.release:
++			case <-r.Context().Done():
++				return
++			}
++			if gate.fail {
++				w.WriteHeader(http.StatusForbidden)
++				fmt.Fprintf(w, `<ErrorResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><Error><Type>Sender</Type><Code>AccessDenied</Code><Message>cannot load role %s</Message></Error><RequestId>local</RequestId></ErrorResponse>`, role)
++			} else {
++				fmt.Fprintf(w, `<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><AssumeRoleResult><Credentials><AccessKeyId>%sKEY</AccessKeyId><SecretAccessKey>rolesecret</SecretAccessKey><SessionToken>%sTOKEN</SessionToken><Expiration>2099-01-01T00:00:00Z</Expiration></Credentials><AssumedRoleUser><Arn>arn:aws:sts::123456789012:assumed-role/%s/session</Arn><AssumedRoleId>role:session</AssumedRoleId></AssumedRoleUser></AssumeRoleResult></AssumeRoleResponse>`, role, role, role)
++			}
++			if flush, ok := w.(http.Flusher); ok {
++				flush.Flush()
++			}
++			return
++		}
++		f.requests.record(r)
++		fmt.Fprint(w, `<DescribeInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>local</requestId><reservationSet/></DescribeInstancesResponse>`)
++	}))
++	t.Cleanup(server.Close)
++	t.Setenv("AWS_ENDPOINT_URL", server.URL)
++	t.Setenv("AWS_ENDPOINT_URL_STS", server.URL)
++	return f
++}
++
++func releaseProfileGates(gates map[string]*profileRoleGate) {
++	for _, gate := range gates {
++		gate.open()
++	}
++}
++
++func assertCommittedProfile(t *testing.T, a *App, update func(func() error), profile, region, key string) {
++	t.Helper()
++	requireProfileSnapshot(t, snapshotProfileOnUI(t, a, update), profile, region, key)
++}
++
++// After the server finishes the superseded response, process UI barriers and
++// observe several event-loop turns. This also catches a late queued error.
++func requireStableProfile(t *testing.T, a *App, update func(func() error), render func() []string, before map[string]bool, profile, region, key, obsolete string) {
++	t.Helper()
++	deadline := time.NewTimer(300 * time.Millisecond)
++	defer deadline.Stop()
++	ticker := time.NewTicker(time.Millisecond)
++	defer ticker.Stop()
++	for {
++		assertCommittedProfile(t, a, update, profile, region, key)
++		if obsolete != "" && newProfileText(render(), before, obsolete) {
++			t.Fatalf("superseded lookup displayed new feedback for %q", obsolete)
++		}
++		select {
++		case <-deadline.C:
++			return
++		case <-ticker.C:
++		}
++	}
++}
++
++func TestAWSPendingProfileCanBeSuperseded(t *testing.T) {
++	for _, oldFailure := range []bool{false, true} {
++		t.Run(fmt.Sprintf("old_failure_%t", oldFailure), func(t *testing.T) {
++			isolatedProfileCase(t, func() {
++				old, latest := newProfileRoleGate(oldFailure), newProfileRoleGate(false)
++				gates := map[string]*profileRoleGate{"slow": old, "newer": latest}
++				f := asyncProfileFixture(t, gates)
++				defer releaseProfileGates(gates)
++				a := startProfileApp(t, "first", "")
++				update, render := startProfileEventLoop(t, a)
++				requireSignedProfileRequest(t, f.requests, 0, "firstKEY", "us-east-1", "firstTOKEN")
++				update(func() error { return selectProfileOptionOnUI(a, "profile", "slow") })
++				awaitProfileSignal(t, old.started, "older role lookup")
++				assertCommittedProfile(t, a, update, "first", "us-east-1", "firstKEY")
++				before := profileRenderBaseline(render)
++				update(func() error { return selectProfileOptionOnUI(a, "profile", "newer") })
++				awaitProfileSignal(t, latest.started, "latest role lookup")
++				assertCommittedProfile(t, a, update, "first", "us-east-1", "firstKEY")
++				mark := f.requests.mark()
++				latest.open()
++				awaitProfileSelection(t, a, update, "newer", "eu-west-2", "newerKEY")
++				requireSignedProfileRequest(t, f.requests, mark, "newerKEY", "eu-west-2", "newerTOKEN")
++				old.open()
++				awaitProfileSignal(t, old.finished, "superseded response or cancellation")
++				requireStableProfile(t, a, update, render, before, "newer", "eu-west-2", "newerKEY", "slow")
++			})
++		})
++	}
++}
++
++func TestAWSRegionChoiceSupersedesPendingProfile(t *testing.T) {
++	isolatedProfileCase(t, func() {
++		old := newProfileRoleGate(false)
++		gates := map[string]*profileRoleGate{"slow": old}
++		f := asyncProfileFixture(t, gates)
++		defer releaseProfileGates(gates)
++		a := startProfileApp(t, "first", "")
++		update, render := startProfileEventLoop(t, a)
++		update(func() error { return selectProfileOptionOnUI(a, "profile", "slow") })
++		awaitProfileSignal(t, old.started, "pending role lookup")
++		assertCommittedProfile(t, a, update, "first", "us-east-1", "firstKEY")
++		before := profileRenderBaseline(render)
++		selectAndAwaitProfile(t, a, update, f.requests, "region", "ap-south-2", "first", "ap-south-2", "firstKEY", "firstTOKEN")
++		old.open()
++		awaitProfileSignal(t, old.finished, "superseded response or cancellation")
++		requireStableProfile(t, a, update, render, before, "first", "ap-south-2", "firstKEY", "slow")
++	})
++}
++
++func TestAWSInvalidChoiceSupersedesPendingProfile(t *testing.T) {
++	isolatedProfileCase(t, func() {
++		old := newProfileRoleGate(false)
++		gates := map[string]*profileRoleGate{"slow": old}
++		f := asyncProfileFixture(t, gates)
++		defer releaseProfileGates(gates)
++		a := startProfileApp(t, "first", "")
++		update, render := startProfileEventLoop(t, a)
++		update(func() error { return selectProfileOptionOnUI(a, "profile", "slow") })
++		awaitProfileSignal(t, old.started, "pending role lookup")
++		before := profileRenderBaseline(render)
++		update(func() error { return selectProfileOptionOnUI(a, "profile", "invalid") })
++		awaitProfileError(t, render, before, "moon-central-1")
++		assertCommittedProfile(t, a, update, "first", "us-east-1", "firstKEY")
++		update(func() error { dismissProfileError(a); return nil })
++		old.open()
++		awaitProfileSignal(t, old.finished, "superseded response or cancellation")
++		requireStableProfile(t, a, update, render, profileRenderBaseline(render), "first", "us-east-1", "firstKEY", "slow")
++		selectAndAwaitProfile(t, a, update, f.requests, "profile", "second", "second", "eu-central-2", "secondKEY", "secondTOKEN")
++	})
++}
++
++func TestAWSLatestRoleFailureKeepsWorkingSession(t *testing.T) {
++	isolatedProfileCase(t, func() {
++		denied := newProfileRoleGate(true)
++		gates := map[string]*profileRoleGate{"denied": denied}
++		f := asyncProfileFixture(t, gates)
++		defer releaseProfileGates(gates)
++		a := startProfileApp(t, "first", "")
++		update, render := startProfileEventLoop(t, a)
++		update(func() error { return selectProfileOptionOnUI(a, "profile", "denied") })
++		awaitProfileSignal(t, denied.started, "latest role lookup")
++		assertCommittedProfile(t, a, update, "first", "us-east-1", "firstKEY")
++		// Loading feedback has already appeared, so it cannot stand in for an error.
++		before := profileRenderBaseline(render)
++		denied.open()
++		awaitProfileError(t, render, before, "denied")
++		assertCommittedProfile(t, a, update, "first", "us-east-1", "firstKEY")
++		update(func() error { dismissProfileError(a); return nil })
++		selectAndAwaitProfile(t, a, update, f.requests, "region", "us-east-2", "first", "us-east-2", "firstKEY", "firstTOKEN")
++		selectAndAwaitProfile(t, a, update, f.requests, "profile", "second", "second", "eu-central-2", "secondKEY", "secondTOKEN")
++	})
++}
++
++// A cache may legitimately avoid another STS request. If a lookup is needed,
++// however, the UI must process new input while that request is held open.
++func awaitRegionLookupOrCachedSelection(t *testing.T, a *App, update func(func() error), gate *profileRoleGate, profile, region string) bool {
++	t.Helper()
++	deadline := time.NewTimer(3 * time.Second)
++	defer deadline.Stop()
++	ticker := time.NewTicker(time.Millisecond)
++	defer ticker.Stop()
++	for {
++		select {
++		case <-gate.started:
++			return true
++		default:
++		}
++		state := snapshotProfileOnUI(t, a, update)
++		if state.profile == profile && state.region == region && state.profileText == profile && state.regionText == region && state.session.Region == region {
++			return false
++		}
++		select {
++		case <-deadline.C:
++			t.Fatal("region choice neither requested credentials nor completed")
++		case <-ticker.C:
++		}
++	}
++}
++
++func TestAWSPendingRegionCanBeSuperseded(t *testing.T) {
++	for _, target := range []string{"profile", "region"} {
++		for _, oldFailure := range []bool{false, true} {
++			t.Run(fmt.Sprintf("%s_old_failure_%t", target, oldFailure), func(t *testing.T) {
++				isolatedProfileCase(t, func() {
++					initial, old := newProfileRoleGate(false), newProfileRoleGate(oldFailure)
++					initial.open()
++					gates := map[string]*profileRoleGate{"current": initial, "current@us-west-2": old}
++					f := asyncProfileFixture(t, gates)
++					defer releaseProfileGates(gates)
++					a := startProfileApp(t, "current", "")
++					update, render := startProfileEventLoop(t, a)
++					requireSignedProfileRequest(t, f.requests, 0, "currentKEY", "eu-west-2", "currentTOKEN")
++					update(func() error { return selectProfileOptionOnUI(a, "region", "us-west-2") })
++					pending := awaitRegionLookupOrCachedSelection(t, a, update, old, "current", "us-west-2")
++					if pending {
++						assertCommittedProfile(t, a, update, "current", "eu-west-2", "currentKEY")
++					}
++					before := profileRenderBaseline(render)
++					profile, region, key, token, value := "current", "ap-south-2", "currentKEY", "currentTOKEN", "ap-south-2"
++					if target == "profile" {
++						profile, region, key, token, value = "second", "eu-central-2", "secondKEY", "secondTOKEN", "second"
++					}
++					selectAndAwaitProfile(t, a, update, f.requests, target, value, profile, region, key, token)
++					old.open()
++					if pending {
++						awaitProfileSignal(t, old.finished, "superseded region response or cancellation")
++					}
++					requireStableProfile(t, a, update, render, before, profile, region, key, "us-west-2")
++				})
++			})
++		}
++	}
++}
 diff --git a/internal/view/profile_selection_test.go b/internal/view/profile_selection_test.go
 new file mode 100644
-index 0000000..17d8f57
+index 0000000..0bec5fd
 --- /dev/null
 +++ b/internal/view/profile_selection_test.go
-@@ -0,0 +1,534 @@
+@@ -0,0 +1,526 @@
 +package view
 +
 +import (
@@ -348,6 +818,7 @@ index 0000000..17d8f57
 +
 +type profileFixture struct {
 +	credentials, configuration string
++	requests                   *profileRequestLog
 +}
 +
 +func profileFiles(t *testing.T, credentials, configuration string) profileFixture {
@@ -362,7 +833,7 @@ index 0000000..17d8f57
 +	t.Setenv("HOME", home)
 +	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
 +	t.Setenv("AWS_MAX_ATTEMPTS", "1")
-+	f := profileFixture{filepath.Join(home, "credentials"), filepath.Join(home, "config")}
++	f := profileFixture{credentials: filepath.Join(home, "credentials"), configuration: filepath.Join(home, "config"), requests: &profileRequestLog{}}
 +	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", f.credentials)
 +	t.Setenv("AWS_CONFIG_FILE", f.configuration)
 +	if credentials != "" {
@@ -382,6 +853,7 @@ index 0000000..17d8f57
 +			fmt.Fprint(w, `<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><AssumeRoleResult><Credentials><AccessKeyId>ROLEKEY</AccessKeyId><SecretAccessKey>rolesecret</SecretAccessKey><SessionToken>roletoken</SessionToken><Expiration>2099-01-01T00:00:00Z</Expiration></Credentials><AssumedRoleUser><Arn>arn:aws:sts::123456789012:assumed-role/dev/session</Arn><AssumedRoleId>role:session</AssumedRoleId></AssumedRoleUser></AssumeRoleResult></AssumeRoleResponse>`)
 +			return
 +		}
++		f.requests.record(r)
 +		fmt.Fprint(w, `<DescribeInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>local</requestId><reservationSet/></DescribeInstancesResponse>`)
 +	}))
 +	t.Cleanup(server.Close)
@@ -508,7 +980,7 @@ index 0000000..17d8f57
 +		close(stopped)
 +	}()
 +	t.Cleanup(func() {
-+		a.Application.Stop()
++		a.Stop()
 +		select {
 +		case <-stopped:
 +			if runErr != nil {
@@ -648,12 +1120,13 @@ index 0000000..17d8f57
 +	for _, tc := range cases {
 +		t.Run(tc.name, func(t *testing.T) {
 +			isolatedProfileCase(t, func() {
-+				profileFiles(t, tc.profiles, tc.config)
++				f := profileFiles(t, tc.profiles, tc.config)
 +				t.Setenv("AWS_PROFILE", tc.envProfile)
 +				t.Setenv("AWS_REGION", tc.envRegion)
 +				t.Setenv("AWS_DEFAULT_REGION", tc.envDefaultRegion)
 +				a := startProfileApp(t, tc.flagProfile, tc.flagRegion)
 +				requireProfileState(t, a, tc.wantProfile, tc.wantRegion, tc.wantProfile+"KEY")
++				requireSignedProfileRequest(t, f.requests, 0, tc.wantProfile+"KEY", tc.wantRegion, "")
 +			})
 +		})
 +	}
@@ -661,9 +1134,10 @@ index 0000000..17d8f57
 +
 +func TestAWSRoleProfileFromConfig(t *testing.T) {
 +	isolatedProfileCase(t, func() {
-+		profileFiles(t, profileKeys("source"), "[profile sandbox-dev]\nrole_arn=arn:aws:iam::123456789012:role/dev\nsource_profile=source\nregion=eu-central-2\n")
++		f := profileFiles(t, profileKeys("source"), "[profile sandbox-dev]\nrole_arn=arn:aws:iam::123456789012:role/dev\nsource_profile=source\nregion=eu-central-2\n")
 +		a := startProfileApp(t, "sandbox-dev", "")
 +		requireProfileState(t, a, "sandbox-dev", "eu-central-2", "ROLEKEY")
++		requireSignedProfileRequest(t, f.requests, 0, "ROLEKEY", "eu-central-2", "roletoken")
 +	})
 +}
 +
@@ -671,7 +1145,7 @@ index 0000000..17d8f57
 +	for _, region := range []string{"", "us-west-2"} {
 +		t.Run("region_"+region, func(t *testing.T) {
 +			isolatedProfileCase(t, func() {
-+				profileFiles(t, "", "")
++				f := profileFiles(t, "", "")
 +				t.Setenv("AWS_ACCESS_KEY_ID", "ENVKEY")
 +				t.Setenv("AWS_SECRET_ACCESS_KEY", "envsecret")
 +				t.Setenv("AWS_SESSION_TOKEN", "envtoken")
@@ -682,8 +1156,8 @@ index 0000000..17d8f57
 +				}
 +				a := startProfileApp(t, "", "")
 +				requireProfileState(t, a, "default", want, "ENVKEY")
-+				selectProfileOption(t, a, "region", "us-east-2")
-+				requireProfileState(t, a, "default", "us-east-2", "ENVKEY")
++				update, _ := startProfileEventLoop(t, a)
++				selectAndAwaitProfile(t, a, update, f.requests, "region", "us-east-2", "default", "us-east-2", "ENVKEY", "envtoken")
 +				session := a.GetContext().Value(internal.KeySession).(awsSDK.Config)
 +				credentials, err := session.Credentials.Retrieve(context.Background())
 +				if err != nil || credentials.SessionToken != "envtoken" {
@@ -727,7 +1201,7 @@ index 0000000..17d8f57
 +				if override == "fallback" {
 +					configuration = "[profile first]\nregion=us-east-1\n"
 +				}
-+				profileFiles(t, profileKeys("first", "second"), configuration)
++				f := profileFiles(t, profileKeys("first", "second"), configuration)
 +				flag, expected := "", "eu-central-2"
 +				if override == "flag" {
 +					flag, expected = "ap-south-2", "ap-south-2"
@@ -740,17 +1214,14 @@ index 0000000..17d8f57
 +					expected = "ap-south-1"
 +				}
 +				a := startProfileApp(t, "first", flag)
-+				selectProfileOption(t, a, "region", "eu-west-1")
-+				requireProfileState(t, a, "first", "eu-west-1", "firstKEY")
-+				selectProfileOption(t, a, "profile", "second")
-+				requireProfileState(t, a, "second", expected, "secondKEY")
-+				selectProfileOption(t, a, "region", "us-east-2")
-+				requireProfileState(t, a, "second", "us-east-2", "secondKEY")
-+				selectProfileOption(t, a, "profile", "first")
++				update, _ := startProfileEventLoop(t, a)
++				selectAndAwaitProfile(t, a, update, f.requests, "region", "eu-west-1", "first", "eu-west-1", "firstKEY", "")
++				selectAndAwaitProfile(t, a, update, f.requests, "profile", "second", "second", expected, "secondKEY", "")
++				selectAndAwaitProfile(t, a, update, f.requests, "region", "us-east-2", "second", "us-east-2", "secondKEY", "")
 +				if override == "config" || override == "fallback" {
 +					expected = "us-east-1"
 +				}
-+				requireProfileState(t, a, "first", expected, "firstKEY")
++				selectAndAwaitProfile(t, a, update, f.requests, "profile", "first", "first", expected, "firstKEY", "")
 +			})
 +		})
 +	}
@@ -792,22 +1263,13 @@ index 0000000..17d8f57
 +					return err
 +				})
 +				requireProfileSnapshot(t, state, "first", "us-east-1", "firstKEY")
-+				shown := false
-+				deadline := time.Now().Add(time.Second)
-+				for time.Now().Before(deadline) {
-+					for _, line := range renderLines() {
-+						if !before[line] && strings.Contains(line, wantError) {
-+							shown = true
-+						}
-+					}
-+					if shown {
-+						break
-+					}
-+					time.Sleep(time.Millisecond)
-+				}
-+				if !shown {
-+					t.Errorf("failed change did not display an error identifying %q", wantError)
-+				}
++				awaitProfileError(t, renderLines, before, wantError)
++				state = snapshotProfileOnUI(t, a, update)
++				requireProfileSnapshot(t, state, "first", "us-east-1", "firstKEY")
++				writeProfileFile(t, f.credentials, profileKeys("first", "second"))
++				writeProfileFile(t, f.configuration, "[profile first]\nregion=us-east-1\n[profile second]\nregion=eu-west-2\n")
++				update(func() error { dismissProfileError(a); return nil })
++				selectAndAwaitProfile(t, a, update, f.requests, "profile", "second", "second", "eu-west-2", "secondKEY", "")
 +			})
 +		})
 +	}

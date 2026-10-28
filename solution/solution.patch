@@ -102,7 +102,7 @@ index e6ca07f..7c399d5 100644
  
  func ensureLogging() *os.File {
 diff --git a/internal/aws/config.go b/internal/aws/config.go
-index 0bbe893..ac1e6fe 100644
+index 0bbe893..657297f 100644
 --- a/internal/aws/config.go
 +++ b/internal/aws/config.go
 @@ -5,7 +5,6 @@ import (
@@ -124,11 +124,73 @@ index 0bbe893..ac1e6fe 100644
  )
  
  type Profiles struct {
-@@ -82,10 +79,9 @@ func GetCfgUsingEnvVariables(profile, region string) (awsV2.Config, error) {
+@@ -43,108 +40,85 @@ func (c credentialProvider) IsExpired() bool {
+ }
+ 
+ func GetCfg(cfgInput AWSConfigInput) (awsV2.Config, error) {
++	cfg, err := GetCfgContext(context.Background(), cfgInput)
++	if err != nil {
++		log.Print("failed to load AWS config ", err)
++	}
++	return cfg, err
++}
++
++// GetCfgContext loads and validates credentials with the caller's cancellation.
++// The caller decides whether an error still belongs to the current user request.
++func GetCfgContext(ctx context.Context, cfgInput AWSConfigInput) (awsV2.Config, error) {
+ 
+ 	var cfg awsV2.Config
+ 	var err error
+ 
+ 	if cfgInput.UseLocalStack {
+-		cfg, err = GetLocalstackCfg(cfgInput.Region)
++		cfg, err = getLocalstackCfg(ctx, cfgInput.Region)
+ 	} else if cfgInput.UseEnvVariables {
+-		cfg, err = GetCfgUsingEnvVariables(cfgInput.Profile, cfgInput.Region)
++		cfg, err = getCfgUsingEnvVariables(ctx, cfgInput.Profile, cfgInput.Region)
+ 	} else {
+ 		cfg, err = awsV2Config.LoadDefaultConfig(
+-			context.TODO(),
++			ctx,
+ 			awsV2Config.WithSharedConfigProfile(cfgInput.Profile),
+ 			awsV2Config.WithRegion(cfgInput.Region),
+ 		)
+ 	}
+ 
+ 	if err != nil {
+-		log.Print("failed to load config")
+ 		return awsV2.Config{}, err
+ 	}
+-	creds, err := cfg.Credentials.Retrieve(context.TODO())
++	creds, err := cfg.Credentials.Retrieve(ctx)
+ 	if err != nil {
+-		log.Print("failed to read credentials ", err)
+ 		return awsV2.Config{}, err
+ 	}
+ 
+ 	credentialProvider := credentialProvider{Credentials: creds}
+ 	if credentialProvider.IsExpired() {
+-		log.Print("Credentials have expired")
+ 		return awsV2.Config{}, errors.New("AWS Credentials expired")
+ 	}
+ 	return cfg, err
+ }
+ 
+ func GetCfgUsingEnvVariables(profile, region string) (awsV2.Config, error) {
++	cfg, err := getCfgUsingEnvVariables(context.Background(), profile, region)
++	if err != nil {
++		log.Print("failed to load AWS environment config ", err)
++	}
++	return cfg, err
++}
++
++func getCfgUsingEnvVariables(ctx context.Context, profile, region string) (awsV2.Config, error) {
+ 	akid := aws.String(os.Getenv(AWS_ACCESS_KEY_ID))
  	secKey := aws.String(os.Getenv(AWS_SECRET_ACCESS_KEY))
  	cfg, err := awsV2Config.LoadDefaultConfig(
- 		context.TODO(),
+-		context.TODO(),
 -		awsV2Config.WithSharedConfigProfile(profile),
++		ctx,
  		awsV2Config.WithRegion(region),
  		config.WithCredentialsProvider(
 -			creds.NewStaticCredentialsProvider(*akid, *secKey, ""),
@@ -136,7 +198,21 @@ index 0bbe893..ac1e6fe 100644
  		),
  	)
  	if err != nil {
-@@ -106,44 +102,6 @@ func GetCfgUsingEnvVariables(profile, region string) (awsV2.Config, error) {
+-		log.Print("failed to load config")
+ 		return awsV2.Config{}, err
+ 	}
+-	creds, err := cfg.Credentials.Retrieve(context.TODO())
++	creds, err := cfg.Credentials.Retrieve(ctx)
+ 	if err != nil {
+-		log.Print("failed to read credentials ", err)
+ 		return awsV2.Config{}, err
+ 	}
+ 
+ 	credentialProvider := credentialProvider{Credentials: creds}
+ 	if credentialProvider.IsExpired() {
+-		log.Print("Credentials have expired")
+ 		return awsV2.Config{}, errors.New("AWS Credentials expired")
+ 	}
  	return cfg, err
  }
  
@@ -176,12 +252,23 @@ index 0bbe893..ac1e6fe 100644
 -		}
 -	}
 -	return ret, nil
--}
--
- func GetLocalstackCfg(region string) (awsV2.Config, error) {
++func GetLocalstackCfg(region string) (awsV2.Config, error) {
++	return getLocalstackCfg(context.Background(), region)
+ }
+ 
+-func GetLocalstackCfg(region string) (awsV2.Config, error) {
++func getLocalstackCfg(ctx context.Context, region string) (awsV2.Config, error) {
  	customResolver := awsV2.EndpointResolverFunc(func(service, region string) (awsV2.Endpoint, error) {
  		return awsV2.Endpoint{
-@@ -158,7 +116,7 @@ func GetLocalstackCfg(region string) (awsV2.Config, error) {
+ 			URL:           GetLocastackEndpoint(),
+@@ -152,13 +126,13 @@ func GetLocalstackCfg(region string) (awsV2.Config, error) {
+ 		}, nil
+ 	})
+ 
+-	awsLSCfg, err := config.LoadDefaultConfig(context.TODO(),
++	awsLSCfg, err := config.LoadDefaultConfig(ctx,
+ 		config.WithRegion(region),
+ 		config.WithEndpointResolver(customResolver),
  		config.WithCredentialsProvider(localstackCredentialsProvider(region)),
  	)
  	if err != nil {
@@ -339,11 +426,14 @@ index 0000000..e4521a7
 +	return defaults.SharedConfigFilename()
 +}
 diff --git a/internal/view/app.go b/internal/view/app.go
-index a09fe09..c187a58 100644
+index a09fe09..41d5375 100644
 --- a/internal/view/app.go
 +++ b/internal/view/app.go
-@@ -8,8 +8,6 @@ import (
+@@ -6,10 +6,9 @@ import (
+ 	"os"
+ 	"sort"
  	"strings"
++	"sync"
  	"time"
  
 -	cfg "github.com/aws/aws-sdk-go-v2/config"
@@ -351,7 +441,7 @@ index a09fe09..c187a58 100644
  	"github.com/derailed/tview"
  	"github.com/gdamore/tcell/v2"
  	"github.com/one2nc/cloudlens/internal"
-@@ -26,21 +24,22 @@ const (
+@@ -26,21 +25,28 @@ const (
  	splashDelay = 1 * time.Second
  )
  
@@ -375,6 +465,10 @@ index a09fe09..c187a58 100644
 +	command              *Command
 +	context              context.Context
 +	cancelFn             context.CancelFunc
++	lifetime             context.Context
++	updateMu             sync.Mutex
++	pendingUpdates       sync.WaitGroup
++	stopping             bool
 +	showHeader           bool
 +	IsPageContentSorted  bool
 +	version              string
@@ -383,10 +477,23 @@ index a09fe09..c187a58 100644
 +	awsProfileOptions    []string
 +	awsRegionOptions     []string
 +	updatingAWSSelection bool
++	awsSelectionVersion  uint64
++	awsSelectionCancel   context.CancelFunc
  }
  
  func NewApp() *App {
-@@ -86,62 +85,43 @@ func (a *App) Init(version string, cloudConfig config.CloudConfig) error {
+@@ -55,7 +61,9 @@ func NewApp() *App {
+ 
+ // TODO keep context param at first place always
+ func (a *App) Init(version string, cloudConfig config.CloudConfig) error {
+-	ctx := context.Background()
++	ctx, cancel := context.WithCancel(context.Background())
++	a.cancelFn = cancel
++	a.lifetime = ctx
+ 	ctx = context.WithValue(ctx, internal.KeyApp, a)
+ 	a.SetContext(ctx)
+ 
+@@ -86,62 +94,43 @@ func (a *App) Init(version string, cloudConfig config.CloudConfig) error {
  	return nil
  }
  
@@ -471,7 +578,7 @@ index a09fe09..c187a58 100644
  	r.SetSelectedFunc(a.regionChanged)
  	a.Views()["region"] = r
  
-@@ -151,7 +131,7 @@ func (a *App) handleAWS() {
+@@ -151,7 +140,7 @@ func (a *App) handleAWS() {
  	}
  	a.Views()["info"] = ui.NewInfo(infoData)
  	a.toggleHeader(true)
@@ -480,7 +587,7 @@ index a09fe09..c187a58 100644
  }
  
  func (a *App) handleGCP() error {
-@@ -207,10 +187,14 @@ func (a *App) handleGCP() error {
+@@ -207,10 +196,14 @@ func (a *App) handleGCP() error {
  func (a *App) showCloudSelectionScreen() {
  	cloudSelectScreen := ui.NewCloudSelectionScreen(ui.OptionWithAction{
  		"AWS": func() {
@@ -497,7 +604,7 @@ index a09fe09..c187a58 100644
  		},
  	}, a.version)
  	a.App.SetFocus(cloudSelectScreen.GetFocusItem())
-@@ -221,7 +205,9 @@ func (a *App) showCloudSelectionScreen() {
+@@ -221,7 +214,9 @@ func (a *App) showCloudSelectionScreen() {
  func (a *App) handleCloudSelection(seletedCloud string) error {
  	switch seletedCloud {
  	case internal.AWS:
@@ -508,7 +615,88 @@ index a09fe09..c187a58 100644
  		a.Main.SwitchToPage(internal.AWS_SCREEN)
  	case internal.GCP:
  		err := a.handleGCP()
-@@ -415,8 +401,17 @@ func (a *App) helpCmd(evt *tcell.EventKey) *tcell.EventKey {
+@@ -265,20 +260,47 @@ func (a *App) layout(ctx context.Context) {
+ 
+ // QueueUpdateDraw queues up a ui action and redraw the ui.
+ func (a *App) QueueUpdateDraw(f func()) {
+-	if a.Application == nil {
++	ctx := a.lifetime
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	go a.queueContextUpdate(ctx, f)
++}
++
++// Register before enqueueing so Stop can keep the event loop alive until all
++// already-queued completions have returned. New work is rejected once stopping.
++func (a *App) queueContextUpdate(ctx context.Context, f func()) {
++	a.updateMu.Lock()
++	if a.stopping || ctx.Err() != nil || a.Application == nil {
++		a.updateMu.Unlock()
+ 		return
+ 	}
+-	go func() {
+-		a.Application.QueueUpdateDraw(f)
+-	}()
++	a.pendingUpdates.Add(1)
++	a.updateMu.Unlock()
++	defer a.pendingUpdates.Done()
++	a.Application.QueueUpdateDraw(func() {
++		if ctx.Err() == nil {
++			f()
++		}
++	})
+ }
+ 
+ func (a *App) Run() error {
+-	//a.Resume()
++	if a.cancelFn != nil {
++		defer a.cancelFn()
++	}
++	defer a.SetRunning(false)
++	ctx := a.GetContext()
+ 	go func() {
+-		<-time.After(splashDelay)
++		select {
++		case <-ctx.Done():
++			return
++		case <-time.After(splashDelay):
++		}
+ 		a.QueueUpdateDraw(func() {
+-
++			if ctx.Err() != nil {
++				return
++			}
+ 			switch a.cloudConfig.SelectedCloud {
+ 			case "":
+ 				a.Main.SwitchToPage(internal.MAIN_SCREEN)
+@@ -300,6 +322,25 @@ func (a *App) Run() error {
+ 	return nil
+ }
+ 
++// Stop cancels credential work and lets queued completions leave the UI thread
++// before shutting its event loop down. It is safe to call from a UI callback.
++func (a *App) Stop() {
++	a.updateMu.Lock()
++	if a.stopping {
++		a.updateMu.Unlock()
++		return
++	}
++	a.stopping = true
++	if a.cancelFn != nil {
++		a.cancelFn()
++	}
++	a.updateMu.Unlock()
++	go func() {
++		a.pendingUpdates.Wait()
++		a.Application.Stop()
++	}()
++}
++
+ func (a *App) GetContext() context.Context {
+ 	return a.context
+ }
+@@ -415,8 +456,16 @@ func (a *App) helpCmd(evt *tcell.EventKey) *tcell.EventKey {
  }
  
  func (a *App) profileChanged(profile string, index int) {
@@ -517,72 +705,53 @@ index a09fe09..c187a58 100644
 +	if a.updatingAWSSelection {
 +		return
 +	}
++	request := a.beginAWSSelection()
 +	region, err := a.awsRegion(profile)
-+	if err == nil {
-+		err = a.refreshSession(profile, region)
-+	}
 +	if err != nil {
-+		a.restoreAWSSelection()
-+		a.App.Flash().Err(err)
++		a.failAWSSelection(request, err)
++		return
 +	}
++	a.loadAWSSelection(request, profile, region)
  }
  
  func (a *App) projectchanged(project string, index int) {
-@@ -428,28 +423,42 @@ func (a *App) zonechanged(zone string, index int) {
+@@ -428,28 +477,16 @@ func (a *App) zonechanged(zone string, index int) {
  }
  
  func (a *App) regionChanged(region string, index int) {
-+	if a.updatingAWSSelection {
-+		return
-+	}
- 	profile := a.GetContext().Value(internal.KeyActiveProfile).(string)
+-	profile := a.GetContext().Value(internal.KeyActiveProfile).(string)
 -	a.refreshSession(profile, region)
-+	if err := a.refreshSession(profile, region); err != nil {
-+		a.restoreAWSSelection()
-+		a.App.Flash().Err(err)
-+	}
- }
- 
+-}
+-
 -func (a *App) refreshSession(profile string, region string) {
 -
-+func (a *App) refreshSession(profile string, region string) error {
-+	if err := validateAWSRegion(region); err != nil {
-+		return err
-+	}
- 	awsConfigInput := aws.AWSConfigInput{
+-	awsConfigInput := aws.AWSConfigInput{
 -		UseLocalStack: a.cloudConfig.UseLocalStack,
 -		Profile:       profile,
 -		Region:        region,
-+		UseLocalStack:   a.cloudConfig.UseLocalStack,
-+		UseEnvVariables: a.awsEnvOnly,
-+		Profile:         profile,
-+		Region:          region,
++	if a.updatingAWSSelection {
++		return
  	}
- 	cfg, err := aws.GetCfg(awsConfigInput)
+-	cfg, err := aws.GetCfg(awsConfigInput)
 -	//sess, err := aws.GetSession(profile, region)
- 	if err != nil {
+-	if err != nil {
 -		a.App.Flash().Err(err)
--		return
-+		return fmt.Errorf("load AWS profile %q in region %q: %w", profile, region, err)
++	request := a.beginAWSSelection()
++	if err := validateAWSRegion(region); err != nil {
++		a.failAWSSelection(request, err)
+ 		return
  	}
- 	ctx := context.WithValue(a.GetContext(), internal.KeySession, cfg)
-+	ctx = context.WithValue(ctx, internal.KeyActiveProfile, profile)
-+	ctx = context.WithValue(ctx, internal.KeyActiveRegion, region)
- 	a.SetContext(ctx)
-+	a.App.UpdateContext(ctx)
-+	a.restoreAWSSelection()
- 	stackedViews := a.Content.Pages.Stack.Flatten()
+-	ctx := context.WithValue(a.GetContext(), internal.KeySession, cfg)
+-	a.SetContext(ctx)
+-	stackedViews := a.Content.Pages.Stack.Flatten()
 -	a.gotoResource(stackedViews[0], "", true)
 -	a.App.Flash().Infof("Refreshing %v...", stackedViews[0])
-+	if len(stackedViews) > 0 && a.command != nil {
-+		a.gotoResource(stackedViews[0], "", true)
-+		a.App.Flash().Infof("Refreshing %v...", stackedViews[0])
-+	}
-+	return nil
++	profile := a.GetContext().Value(internal.KeyActiveProfile).(string)
++	a.loadAWSSelection(request, profile, region)
  }
  
  func (a *App) refreshProject(project string) {
-@@ -531,41 +540,3 @@ func (a *App) zone() *ui.DropDown {
+@@ -531,41 +568,3 @@ func (a *App) zone() *ui.DropDown {
  func (a *App) region() *ui.DropDown {
  	return a.Views()["region"].(*ui.DropDown)
  }
@@ -626,19 +795,22 @@ index a09fe09..c187a58 100644
 -}
 diff --git a/internal/view/aws_selection.go b/internal/view/aws_selection.go
 new file mode 100644
-index 0000000..3c25276
+index 0000000..0f207fa
 --- /dev/null
 +++ b/internal/view/aws_selection.go
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,175 @@
 +package view
 +
 +import (
++	"context"
 +	"fmt"
 +	"os"
 +	"sort"
 +
++	awsSDK "github.com/aws/aws-sdk-go-v2/aws"
 +	"github.com/one2nc/cloudlens/internal"
 +	"github.com/one2nc/cloudlens/internal/aws"
++	"github.com/one2nc/cloudlens/internal/ui/dialog"
 +)
 +
 +func (a *App) awsProfiles() ([]string, string, bool, error) {
@@ -726,4 +898,79 @@ index 0000000..3c25276
 +	region := a.GetContext().Value(internal.KeyActiveRegion).(string)
 +	a.profile().SetCurrentOption(optionIndex(a.awsProfileOptions, profile))
 +	a.region().SetCurrentOption(optionIndex(a.awsRegionOptions, region))
++}
++
++// Selection state belongs to the UI thread. A request carries only immutable
++// inputs into the worker; completing credentials never changes the live session.
++type awsSelectionRequest struct {
++	version uint64
++	context context.Context
++	cancel  context.CancelFunc
++}
++
++func (a *App) beginAWSSelection() awsSelectionRequest {
++	a.awsSelectionVersion++
++	if a.awsSelectionCancel != nil {
++		a.awsSelectionCancel()
++	}
++	ctx, cancel := context.WithCancel(a.GetContext())
++	a.awsSelectionCancel = cancel
++	a.restoreAWSSelection()
++	return awsSelectionRequest{version: a.awsSelectionVersion, context: ctx, cancel: cancel}
++}
++
++func (a *App) currentAWSSelection(request awsSelectionRequest) bool {
++	return request.version == a.awsSelectionVersion && request.context.Err() == nil
++}
++
++func (a *App) failAWSSelection(request awsSelectionRequest, err error) {
++	if !a.currentAWSSelection(request) {
++		return
++	}
++	request.cancel()
++	a.awsSelectionCancel = nil
++	// Display on this UI turn, rather than letting a delayed notification from
++	// an earlier choice appear after another selection has superseded it.
++	dialog.ShowError(a.Main, err.Error())
++}
++
++func (a *App) loadAWSSelection(request awsSelectionRequest, profile, region string) {
++	input := aws.AWSConfigInput{
++		UseLocalStack:   a.cloudConfig.UseLocalStack,
++		UseEnvVariables: a.awsEnvOnly,
++		Profile:         profile,
++		Region:          region,
++	}
++	go func() {
++		cfg, err := aws.GetCfgContext(request.context, input)
++		if request.context.Err() != nil {
++			return
++		}
++		a.queueContextUpdate(request.context, func() {
++			if !a.currentAWSSelection(request) {
++				return
++			}
++			if err != nil {
++				a.failAWSSelection(request, fmt.Errorf("load AWS profile %q in region %q: %w", profile, region, err))
++				return
++			}
++			a.commitAWSSelection(cfg, profile, region)
++			request.cancel()
++			a.awsSelectionCancel = nil
++		})
++	}()
++}
++
++func (a *App) commitAWSSelection(cfg awsSDK.Config, profile, region string) {
++	ctx := context.WithValue(a.GetContext(), internal.KeySession, cfg)
++	ctx = context.WithValue(ctx, internal.KeyActiveProfile, profile)
++	ctx = context.WithValue(ctx, internal.KeyActiveRegion, region)
++	a.SetContext(ctx)
++	a.App.UpdateContext(ctx)
++	a.restoreAWSSelection()
++	stackedViews := a.Content.Pages.Stack.Flatten()
++	if len(stackedViews) > 0 && a.command != nil {
++		a.gotoResource(stackedViews[0], "", true)
++		a.App.Flash().Infof("Refreshing %v...", stackedViews[0])
++	}
 +}
