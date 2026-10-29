@@ -766,12 +766,173 @@ index 0000000..2b0c0e4
 +		}
 +	}
 +}
+diff --git a/internal/view/profile_live_selection_test.go b/internal/view/profile_live_selection_test.go
+new file mode 100644
+index 0000000..c38838f
+--- /dev/null
++++ b/internal/view/profile_live_selection_test.go
+@@ -0,0 +1,155 @@
++package view
++
++import (
++	"strings"
++	"testing"
++
++	"github.com/derailed/tview"
++	"github.com/gdamore/tcell/v2"
++)
++
++// A region picked by hand is remembered for the profile it was picked under,
++// even across an intervening failed switch, and restored on switching back
++// ahead of that profile's configured region.
++func TestAWSManualRegionRestoredAfterFailedSwitch(t *testing.T) {
++	isolatedProfileCase(t, func() {
++		f := profileFiles(t, profileKeys("first", "second"), "[profile first]\nregion=us-east-1\n[profile second]\nregion=eu-west-2\n")
++		a := startProfileApp(t, "first", "")
++		update, render := startProfileEventLoop(t, a)
++		selectAndAwaitProfile(t, a, update, f.requests, "region", "eu-west-1", "first", "eu-west-1", "firstKEY", "")
++		// Break the target profile, then try and fail to switch to it.
++		writeProfileFile(t, f.configuration, "[profile first]\nregion=us-east-1\n[profile second]\nregion=moon-central-1\n")
++		before := profileRenderBaseline(render)
++		update(func() error { return selectProfileOptionOnUI(a, "profile", "second") })
++		awaitProfileError(t, render, before, "moon-central-1")
++		assertCommittedProfile(t, a, update, "first", "eu-west-1", "firstKEY")
++		update(func() error { dismissProfileError(a); return nil })
++		// Repair it, switch away, and switch back: the hand-picked region for
++		// "first" must return instead of its configured us-east-1.
++		writeProfileFile(t, f.configuration, "[profile first]\nregion=us-east-1\n[profile second]\nregion=eu-west-2\n")
++		selectAndAwaitProfile(t, a, update, f.requests, "profile", "second", "second", "eu-west-2", "secondKEY", "")
++		selectAndAwaitProfile(t, a, update, f.requests, "profile", "first", "first", "eu-west-1", "firstKEY", "")
++	})
++}
++
++// While a slow profile load is pending, a hand-picked region still binds to
++// the working profile, is remembered for it, and is restored after a round
++// trip through the newly committed profile.
++func TestAWSManualRegionDuringPendingProfile(t *testing.T) {
++	isolatedProfileCase(t, func() {
++		slow := newProfileRoleGate(false)
++		gates := map[string]*profileRoleGate{"slow": slow}
++		f := asyncProfileFixture(t, gates)
++		defer releaseProfileGates(gates)
++		a := startProfileApp(t, "first", "")
++		update, render := startProfileEventLoop(t, a)
++		update(func() error { return selectProfileOptionOnUI(a, "profile", "slow") })
++		awaitProfileSignal(t, slow.started, "pending role lookup")
++		assertCommittedProfile(t, a, update, "first", "us-east-1", "firstKEY")
++		before := profileRenderBaseline(render)
++		selectAndAwaitProfile(t, a, update, f.requests, "region", "ap-south-2", "first", "ap-south-2", "firstKEY", "firstTOKEN")
++		slow.open()
++		awaitProfileSignal(t, slow.finished, "superseded response or cancellation")
++		requireStableProfile(t, a, update, render, before, "first", "ap-south-2", "firstKEY", "slow")
++		// Leave and return: the region picked during the pending load belongs
++		// to "first" and must be restored for it.
++		selectAndAwaitProfile(t, a, update, f.requests, "profile", "second", "second", "eu-central-2", "secondKEY", "secondTOKEN")
++		selectAndAwaitProfile(t, a, update, f.requests, "profile", "first", "first", "ap-south-2", "firstKEY", "firstTOKEN")
++	})
++}
++
++// Profile discovery is live: a profile added to the shared files while the UI
++// is open becomes selectable without a restart, and its configured region
++// applies.
++func TestAWSProfileAddedWhileOpenIsSelectable(t *testing.T) {
++	isolatedProfileCase(t, func() {
++		f := profileFiles(t, profileKeys("first"), "[profile first]\nregion=us-east-1\n")
++		a := startProfileApp(t, "first", "")
++		update, _ := startProfileEventLoop(t, a)
++		writeProfileFile(t, f.credentials, profileKeys("first", "added"))
++		writeProfileFile(t, f.configuration, "[profile first]\nregion=us-east-1\n[profile added]\nregion=eu-central-2\n")
++		selectAndAwaitProfile(t, a, update, f.requests, "profile", "added", "added", "eu-central-2", "addedKEY", "")
++		// The picker must now advertise both profiles.
++		var listed []string
++		update(func() error {
++			list := openProfileOptions(t, a, "profile")
++			for index := 0; index < list.GetItemCount(); index++ {
++				text, _ := list.GetItemText(index)
++				listed = append(listed, strings.TrimSpace(text))
++			}
++			list.InputHandler()(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone), func(tview.Primitive) {})
++			return nil
++		})
++		if len(listed) != 2 {
++			t.Fatalf("profile picker = %v, want first and added", listed)
++		}
++		selectAndAwaitProfile(t, a, update, f.requests, "profile", "first", "first", "us-east-1", "firstKEY", "")
++	})
++}
++
++// Editing the configured region of the profile being switched to takes
++// effect on that switch; no restart or stale region may be used.
++func TestAWSProfileRegionEditAppliesOnSwitch(t *testing.T) {
++	isolatedProfileCase(t, func() {
++		f := profileFiles(t, profileKeys("first", "second"), "[profile first]\nregion=us-east-1\n[profile second]\nregion=eu-west-2\n")
++		a := startProfileApp(t, "first", "")
++		update, _ := startProfileEventLoop(t, a)
++		writeProfileFile(t, f.configuration, "[profile first]\nregion=us-east-1\n[profile second]\nregion=eu-central-2\n")
++		selectAndAwaitProfile(t, a, update, f.requests, "profile", "second", "second", "eu-central-2", "secondKEY", "")
++	})
++}
++
++// Switching to a profile removed from the shared files fails by name, keeps
++// the working session, and recovery works once the profile exists again.
++func TestAWSRemovedProfileSwitchFailsCleanly(t *testing.T) {
++	isolatedProfileCase(t, func() {
++		f := profileFiles(t, profileKeys("first", "second"), "[profile first]\nregion=us-east-1\n[profile second]\nregion=eu-west-2\n")
++		a := startProfileApp(t, "first", "")
++		update, render := startProfileEventLoop(t, a)
++		writeProfileFile(t, f.credentials, profileKeys("first"))
++		writeProfileFile(t, f.configuration, "[profile first]\nregion=us-east-1\n")
++		before := profileRenderBaseline(render)
++		// The entry may still be displayed from startup; choosing it must fail
++		// cleanly, or an already-refreshed picker must no longer offer it.
++		offered := false
++		update(func() error {
++			list := openProfileOptions(t, a, "profile")
++			for index := 0; index < list.GetItemCount(); index++ {
++				text, _ := list.GetItemText(index)
++				if strings.TrimSpace(text) == "second" {
++					offered = true
++				}
++			}
++			list.InputHandler()(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone), func(tview.Primitive) {})
++			return nil
++		})
++		if offered {
++			update(func() error { return selectProfileOptionOnUI(a, "profile", "second") })
++			awaitProfileError(t, render, before, "second")
++		}
++		assertCommittedProfile(t, a, update, "first", "us-east-1", "firstKEY")
++		update(func() error { dismissProfileError(a); return nil })
++		// Restore the profile; switching must succeed again.
++		writeProfileFile(t, f.credentials, profileKeys("first", "second"))
++		writeProfileFile(t, f.configuration, "[profile first]\nregion=us-east-1\n[profile second]\nregion=eu-west-2\n")
++		selectAndAwaitProfile(t, a, update, f.requests, "profile", "second", "second", "eu-west-2", "secondKEY", "")
++	})
++}
++
++// A malformed shared file discovered on a switch attempt fails the switch by
++// path, keeps the working session, and recovers after the file is repaired.
++func TestAWSMalformedFileOnSwitchFailsCleanly(t *testing.T) {
++	isolatedProfileCase(t, func() {
++		f := profileFiles(t, profileKeys("first", "second"), "[profile first]\nregion=us-east-1\n[profile second]\nregion=eu-west-2\n")
++		a := startProfileApp(t, "first", "")
++		update, render := startProfileEventLoop(t, a)
++		writeProfileFile(t, f.configuration, "[profile second\nregion=eu-west-2\n")
++		before := profileRenderBaseline(render)
++		update(func() error { return selectProfileOptionOnUI(a, "profile", "second") })
++		awaitProfileError(t, render, before, "config")
++		assertCommittedProfile(t, a, update, "first", "us-east-1", "firstKEY")
++		update(func() error { dismissProfileError(a); return nil })
++		writeProfileFile(t, f.configuration, "[profile first]\nregion=us-east-1\n[profile second]\nregion=eu-west-2\n")
++		selectAndAwaitProfile(t, a, update, f.requests, "profile", "second", "second", "eu-west-2", "secondKEY", "")
++	})
++}
 diff --git a/internal/view/profile_selection_test.go b/internal/view/profile_selection_test.go
 new file mode 100644
-index 0000000..0bec5fd
+index 0000000..6880cb0
 --- /dev/null
 +++ b/internal/view/profile_selection_test.go
-@@ -0,0 +1,526 @@
+@@ -0,0 +1,529 @@
 +package view
 +
 +import (
@@ -1219,7 +1380,10 @@ index 0000000..0bec5fd
 +				selectAndAwaitProfile(t, a, update, f.requests, "profile", "second", "second", expected, "secondKEY", "")
 +				selectAndAwaitProfile(t, a, update, f.requests, "region", "us-east-2", "second", "us-east-2", "secondKEY", "")
 +				if override == "config" || override == "fallback" {
-+					expected = "us-east-1"
++					// A region picked by hand is remembered for its profile and
++					// restored when switching back, ahead of the config region
++					// and the fallback. Flag and env overrides still win.
++					expected = "eu-west-1"
 +				}
 +				selectAndAwaitProfile(t, a, update, f.requests, "profile", "first", "first", expected, "firstKEY", "")
 +			})

@@ -425,8 +425,38 @@ index 0000000..e4521a7
 +	}
 +	return defaults.SharedConfigFilename()
 +}
+diff --git a/internal/ui/dropdown.go b/internal/ui/dropdown.go
+index 4e340d1..7dc6366 100644
+--- a/internal/ui/dropdown.go
++++ b/internal/ui/dropdown.go
+@@ -13,6 +13,25 @@ type DropDown struct {
+ 	*tview.DropDown
+ 	label   string
+ 	options []string
++	onOpen  func()
++}
++
++// SetOpenFunc registers a hook run before the option list is built, so the
++// picker can refresh its options from their source each time it is opened.
++func (d *DropDown) SetOpenFunc(f func()) {
++	d.onOpen = f
++}
++
++func (d *DropDown) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
++	inner := d.DropDown.InputHandler()
++	return func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
++		if d.onOpen != nil {
++			d.onOpen()
++		}
++		if inner != nil {
++			inner(event, setFocus)
++		}
++	}
+ }
+ 
+ func NewDropDown(label string, options []string) *DropDown {
 diff --git a/internal/view/app.go b/internal/view/app.go
-index a09fe09..41d5375 100644
+index a09fe09..91ae8b4 100644
 --- a/internal/view/app.go
 +++ b/internal/view/app.go
 @@ -6,10 +6,9 @@ import (
@@ -441,7 +471,7 @@ index a09fe09..41d5375 100644
  	"github.com/derailed/tview"
  	"github.com/gdamore/tcell/v2"
  	"github.com/one2nc/cloudlens/internal"
-@@ -26,21 +25,28 @@ const (
+@@ -26,21 +25,30 @@ const (
  	splashDelay = 1 * time.Second
  )
  
@@ -479,10 +509,12 @@ index a09fe09..41d5375 100644
 +	updatingAWSSelection bool
 +	awsSelectionVersion  uint64
 +	awsSelectionCancel   context.CancelFunc
++	awsManualRegions     map[string]string
++	awsManualRegionFor   string
  }
  
  func NewApp() *App {
-@@ -55,7 +61,9 @@ func NewApp() *App {
+@@ -55,7 +63,9 @@ func NewApp() *App {
  
  // TODO keep context param at first place always
  func (a *App) Init(version string, cloudConfig config.CloudConfig) error {
@@ -493,7 +525,7 @@ index a09fe09..41d5375 100644
  	ctx = context.WithValue(ctx, internal.KeyApp, a)
  	a.SetContext(ctx)
  
-@@ -86,62 +94,43 @@ func (a *App) Init(version string, cloudConfig config.CloudConfig) error {
+@@ -86,62 +96,44 @@ func (a *App) Init(version string, cloudConfig config.CloudConfig) error {
  	return nil
  }
  
@@ -569,6 +601,7 @@ index a09fe09..41d5375 100644
  	p := ui.NewDropDown("Profile:", profiles)
 +	p.SetCurrentOption(optionIndex(profiles, selectedProfile))
  	p.SetSelectedFunc(a.profileChanged)
++	p.SetOpenFunc(a.refreshAWSProfilesOnOpen)
  	a.Views()["profile"] = p
  
 +	regions := aws.GetAllRegions()
@@ -578,7 +611,7 @@ index a09fe09..41d5375 100644
  	r.SetSelectedFunc(a.regionChanged)
  	a.Views()["region"] = r
  
-@@ -151,7 +140,7 @@ func (a *App) handleAWS() {
+@@ -151,7 +143,7 @@ func (a *App) handleAWS() {
  	}
  	a.Views()["info"] = ui.NewInfo(infoData)
  	a.toggleHeader(true)
@@ -587,7 +620,7 @@ index a09fe09..41d5375 100644
  }
  
  func (a *App) handleGCP() error {
-@@ -207,10 +196,14 @@ func (a *App) handleGCP() error {
+@@ -207,10 +199,14 @@ func (a *App) handleGCP() error {
  func (a *App) showCloudSelectionScreen() {
  	cloudSelectScreen := ui.NewCloudSelectionScreen(ui.OptionWithAction{
  		"AWS": func() {
@@ -604,7 +637,7 @@ index a09fe09..41d5375 100644
  		},
  	}, a.version)
  	a.App.SetFocus(cloudSelectScreen.GetFocusItem())
-@@ -221,7 +214,9 @@ func (a *App) showCloudSelectionScreen() {
+@@ -221,7 +217,9 @@ func (a *App) showCloudSelectionScreen() {
  func (a *App) handleCloudSelection(seletedCloud string) error {
  	switch seletedCloud {
  	case internal.AWS:
@@ -615,7 +648,7 @@ index a09fe09..41d5375 100644
  		a.Main.SwitchToPage(internal.AWS_SCREEN)
  	case internal.GCP:
  		err := a.handleGCP()
-@@ -265,20 +260,47 @@ func (a *App) layout(ctx context.Context) {
+@@ -265,20 +263,47 @@ func (a *App) layout(ctx context.Context) {
  
  // QueueUpdateDraw queues up a ui action and redraw the ui.
  func (a *App) QueueUpdateDraw(f func()) {
@@ -670,7 +703,7 @@ index a09fe09..41d5375 100644
  			switch a.cloudConfig.SelectedCloud {
  			case "":
  				a.Main.SwitchToPage(internal.MAIN_SCREEN)
-@@ -300,6 +322,25 @@ func (a *App) Run() error {
+@@ -300,6 +325,25 @@ func (a *App) Run() error {
  	return nil
  }
  
@@ -696,7 +729,7 @@ index a09fe09..41d5375 100644
  func (a *App) GetContext() context.Context {
  	return a.context
  }
-@@ -415,8 +456,16 @@ func (a *App) helpCmd(evt *tcell.EventKey) *tcell.EventKey {
+@@ -415,8 +459,24 @@ func (a *App) helpCmd(evt *tcell.EventKey) *tcell.EventKey {
  }
  
  func (a *App) profileChanged(profile string, index int) {
@@ -706,7 +739,15 @@ index a09fe09..41d5375 100644
 +		return
 +	}
 +	request := a.beginAWSSelection()
-+	region, err := a.awsRegion(profile)
++	if err := a.refreshAWSProfiles(); err != nil {
++		a.failAWSSelection(request, err)
++		return
++	}
++	if !a.cloudConfig.UseLocalStack && !a.awsEnvOnly && optionIndex(a.awsProfileOptions, profile) < 0 {
++		a.failAWSSelection(request, fmt.Errorf("could not load AWS profile %q: profile not found", profile))
++		return
++	}
++	region, err := a.awsSwitchRegion(profile)
 +	if err != nil {
 +		a.failAWSSelection(request, err)
 +		return
@@ -715,7 +756,7 @@ index a09fe09..41d5375 100644
  }
  
  func (a *App) projectchanged(project string, index int) {
-@@ -428,28 +477,16 @@ func (a *App) zonechanged(zone string, index int) {
+@@ -428,28 +488,19 @@ func (a *App) zonechanged(zone string, index int) {
  }
  
  func (a *App) regionChanged(region string, index int) {
@@ -747,11 +788,14 @@ index a09fe09..41d5375 100644
 -	a.gotoResource(stackedViews[0], "", true)
 -	a.App.Flash().Infof("Refreshing %v...", stackedViews[0])
 +	profile := a.GetContext().Value(internal.KeyActiveProfile).(string)
++	// The choice binds to the working profile, even if another profile load
++	// is still pending; it is remembered only once it actually commits.
++	a.awsManualRegionFor = profile
 +	a.loadAWSSelection(request, profile, region)
  }
  
  func (a *App) refreshProject(project string) {
-@@ -531,41 +568,3 @@ func (a *App) zone() *ui.DropDown {
+@@ -531,41 +582,3 @@ func (a *App) zone() *ui.DropDown {
  func (a *App) region() *ui.DropDown {
  	return a.Views()["region"].(*ui.DropDown)
  }
@@ -795,10 +839,10 @@ index a09fe09..41d5375 100644
 -}
 diff --git a/internal/view/aws_selection.go b/internal/view/aws_selection.go
 new file mode 100644
-index 0000000..0f207fa
+index 0000000..bf7930e
 --- /dev/null
 +++ b/internal/view/aws_selection.go
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,228 @@
 +package view
 +
 +import (
@@ -961,7 +1005,60 @@ index 0000000..0f207fa
 +	}()
 +}
 +
++// Opening the picker re-reads the shared files; a discovery error is shown
++// and the last known options stay in place.
++func (a *App) refreshAWSProfilesOnOpen() {
++	if err := a.refreshAWSProfiles(); err != nil {
++		dialog.ShowError(a.Main, err.Error())
++	}
++}
++
++// Re-read both shared files so profiles added, removed, or edited while the
++// UI is open take effect on the next switch. Listing never loads credentials.
++// The picker is updated in place and restored to the working selection.
++func (a *App) refreshAWSProfiles() error {
++	if a.cloudConfig.UseLocalStack {
++		return nil
++	}
++	profiles, err := aws.GetProfiles()
++	if err != nil {
++		return err
++	}
++	if a.awsEnvOnly {
++		profiles = []string{"default"}
++	}
++	a.awsProfileOptions = profiles
++	a.updatingAWSSelection = true
++	// SetOptions replaces the selected handler, so re-register it afterwards.
++	a.profile().SetOptions(profiles, nil)
++	a.profile().SetSelectedFunc(a.profileChanged)
++	a.updatingAWSSelection = false
++	a.restoreAWSSelection()
++	return nil
++}
++
++// Region for a profile switch: the startup precedence, except that a region
++// picked by hand for this profile outranks its configured region. Flag and
++// environment overrides still win and are not remembered.
++func (a *App) awsSwitchRegion(profile string) (string, error) {
++	if a.cloudConfig.UseLocalStack || a.cloudConfig.Region != "" ||
++		os.Getenv("AWS_REGION") != "" || os.Getenv("AWS_DEFAULT_REGION") != "" {
++		return a.awsRegion(profile)
++	}
++	if region := a.awsManualRegions[profile]; region != "" {
++		return region, validateAWSRegion(region)
++	}
++	return a.awsRegion(profile)
++}
++
 +func (a *App) commitAWSSelection(cfg awsSDK.Config, profile, region string) {
++	if a.awsManualRegionFor == profile {
++		if a.awsManualRegions == nil {
++			a.awsManualRegions = make(map[string]string)
++		}
++		a.awsManualRegions[profile] = region
++	}
++	a.awsManualRegionFor = ""
 +	ctx := context.WithValue(a.GetContext(), internal.KeySession, cfg)
 +	ctx = context.WithValue(ctx, internal.KeyActiveProfile, profile)
 +	ctx = context.WithValue(ctx, internal.KeyActiveRegion, region)
