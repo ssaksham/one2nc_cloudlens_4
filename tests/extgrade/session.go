@@ -24,6 +24,8 @@ type session struct {
 
 	credentials string
 	config      string
+
+	beforeChoice string // pane immediately before the most recent selection input
 }
 
 func (h *harness) newHome() (string, error) {
@@ -489,6 +491,7 @@ func (s *session) choose(kind, value string) bool {
 			mark = s.fx.mark()
 		}
 		beforePane := s.pane()
+		s.beforeChoice = beforePane
 		s.key("Enter")
 		deadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(deadline) {
@@ -504,7 +507,7 @@ func (s *session) choose(kind, value string) bool {
 			// or by pinning the field to the last working value, so any
 			// new error text in the pane also counts as the pick entered.
 			pane := s.pane()
-			if strings.Contains(pane, "Dismiss") || hasNewErrorText(beforePane, pane) {
+			if strings.Contains(pane, "Dismiss") || hasNewErrorText(beforePane, pane) || hasNewNamedText(beforePane, pane, value) {
 				return true
 			}
 			time.Sleep(100 * time.Millisecond)
@@ -553,6 +556,7 @@ func (s *session) chooseByClick(kind, value string) bool {
 			}
 			for _, field := range strings.Fields(line) {
 				if field == value {
+					s.beforeChoice = s.pane()
 					s.click(15, i+1)
 					return true
 				}

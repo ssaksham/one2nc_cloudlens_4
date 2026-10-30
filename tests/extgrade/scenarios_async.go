@@ -62,16 +62,17 @@ func awaitGateFinished(g *gate) bool {
 	}
 }
 
-// requireStable samples the pane for a window: the committed selection must
-// not move and no feedback about the superseded choice may appear.
-func requireStable(s *session, profile, region, obsolete string, dur time.Duration) bool {
+// requireStable observes the committed selection and newly rendered feedback
+// after an older request finishes. A name already present in a picker or status
+// line is not new feedback, and messages may wrap or use any error wording.
+func requireStable(s *session, before, profile, region, obsolete string, dur time.Duration) bool {
 	deadline := time.Now().Add(dur)
 	for time.Now().Before(deadline) {
 		pane := s.pane()
 		if headerValue(profileHeaderRe, pane) != profile || headerValue(regionHeaderRe, pane) != region {
 			return false
 		}
-		if obsolete != "" && strings.Contains(normalize(pane), normalize(obsolete)) {
+		if obsolete != "" && hasNewNamedText(before, pane, obsolete) {
 			return false
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -133,18 +134,19 @@ func pendingProfile(h *harness) {
 			if good && !s.awaitState(sub, mark, "newer", "eu-west-2", "newerKEY", "newerTOKEN") {
 				good = false
 			}
+			before := s.pane()
 			gates["slow"].open()
 			if good && !awaitGateFinished(gates["slow"]) {
 				good = h.check(sub, false, "superseded lookup never finished or was cancelled")
 			}
-			if good && !requireStable(s, "newer", "eu-west-2", "slow", 700*time.Millisecond) {
+			if good && !requireStable(s, before, "newer", "eu-west-2", "slow", 700*time.Millisecond) {
 				good = h.check(sub, false, "superseded lookup had a visible effect; pane:\n%s", tail(s.pane()))
 			}
-			h.check(sub, good, "pending-profile sequence failed (old_failure=%t)", oldFailure)
+			h.verdict(sub, good, "pending-profile sequence failed (old_failure=%t)", oldFailure)
 			all = all && good
 		}()
 	}
-	h.check(viewPkg+"TestAWSPendingProfileCanBeSuperseded", all, "a pending-profile subcase failed")
+	h.verdict(viewPkg+"TestAWSPendingProfileCanBeSuperseded", all, "a pending-profile subcase failed")
 }
 
 func regionChoiceSupersedes(h *harness) {
@@ -172,14 +174,15 @@ func regionChoiceSupersedes(h *harness) {
 		good = s.awaitHeader("first", "ap-south-2", 15*time.Second) && s.awaitRequest(mark, signedRequest{"firstKEY", "ap-south-2", "firstTOKEN"}, 15*time.Second)
 		h.check(id, good, "region choice did not commit for the working profile")
 	}
+	before := s.pane()
 	gates["slow"].open()
 	if good && !awaitGateFinished(gates["slow"]) {
 		good = h.check(id, false, "superseded lookup never finished")
 	}
-	if good && !requireStable(s, "first", "ap-south-2", "slow", 700*time.Millisecond) {
+	if good && !requireStable(s, before, "first", "ap-south-2", "slow", 700*time.Millisecond) {
 		good = h.check(id, false, "superseded profile had a visible effect")
 	}
-	h.check(id, good, "region-choice supersede sequence failed")
+	h.verdict(id, good, "region-choice supersede sequence failed")
 }
 
 func invalidChoiceSupersedes(h *harness) {
@@ -206,13 +209,13 @@ func invalidChoiceSupersedes(h *harness) {
 		good = s.awaitText("moon-central-1", 15*time.Second) && s.awaitHeader("first", "us-east-1", 3*time.Second)
 		h.check(id, good, "invalid choice did not fail visibly on the working session")
 	}
-	s.key("Enter")
-	time.Sleep(300 * time.Millisecond)
+	s.dismissFeedback()
+	before := s.pane()
 	gates["slow"].open()
 	if good && !awaitGateFinished(gates["slow"]) {
 		good = h.check(id, false, "superseded lookup never finished")
 	}
-	if good && !requireStable(s, "first", "us-east-1", "slow", 700*time.Millisecond) {
+	if good && !requireStable(s, before, "first", "us-east-1", "slow", 700*time.Millisecond) {
 		good = h.check(id, false, "superseded lookup had a visible effect")
 	}
 	mark := fx.mark()
@@ -222,7 +225,7 @@ func invalidChoiceSupersedes(h *harness) {
 	} else if good {
 		good = h.check(id, false, "profile picker did not open after invalid choice")
 	}
-	h.check(id, good, "invalid-choice supersede sequence failed")
+	h.verdict(id, good, "invalid-choice supersede sequence failed")
 }
 
 func latestRoleFailure(h *harness) {
@@ -247,8 +250,7 @@ func latestRoleFailure(h *harness) {
 		good = s.awaitText("denied", 15*time.Second) && s.awaitHeader("first", "us-east-1", 3*time.Second)
 		h.check(id, good, "latest failure was not shown on the working session; pane:\n%s", tail(s.pane()))
 	}
-	s.key("Enter")
-	time.Sleep(300 * time.Millisecond)
+	s.dismissFeedback()
 	mark := fx.mark()
 	if good && s.choose("region", "us-east-2") {
 		good = s.awaitHeader("first", "us-east-2", 15*time.Second) && s.awaitRequest(mark, signedRequest{"firstKEY", "us-east-2", "firstTOKEN"}, 15*time.Second)
@@ -263,7 +265,7 @@ func latestRoleFailure(h *harness) {
 	} else if good {
 		good = h.check(id, false, "profile picker did not reopen after role failure")
 	}
-	h.check(id, good, "latest-role-failure sequence failed")
+	h.verdict(id, good, "latest-role-failure sequence failed")
 }
 
 func pendingRegion(h *harness) {
@@ -318,21 +320,18 @@ func pendingRegion(h *harness) {
 					good = s.awaitHeader(profile, region, 15*time.Second) && s.awaitRequest(mark, signedRequest{key, region, token}, 15*time.Second)
 					h.check(sub, good, "superseding %s choice did not commit", target)
 				}
+				before := s.pane()
 				gates["current@us-west-2"].open()
 				if good && pending && !awaitGateFinished(gates["current@us-west-2"]) {
 					good = h.check(sub, false, "superseded region lookup never finished")
 				}
-				if good && !requireStable(s, profile, region, "us-west-2", 700*time.Millisecond) {
-					// The obsolete string is the superseded region; it may
-					// legitimately appear in the open picker's list, which is
-					// closed by now. Only the header/stability matters here.
-					good = s.awaitHeader(profile, region, 2*time.Second)
-					h.check(sub, good, "selection unstable after superseded region lookup")
+				if good && !requireStable(s, before, profile, region, "us-west-2", 700*time.Millisecond) {
+					good = h.check(sub, false, "superseded region lookup had a visible effect; pane:\n%s", tail(s.pane()))
 				}
-				h.check(sub, good, "pending-region sequence failed (%s, old_failure=%t)", target, oldFailure)
+				h.verdict(sub, good, "pending-region sequence failed (%s, old_failure=%t)", target, oldFailure)
 				all = all && good
 			}()
 		}
 	}
-	h.check(viewPkg+"TestAWSPendingRegionCanBeSuperseded", all, "a pending-region subcase failed")
+	h.verdict(viewPkg+"TestAWSPendingRegionCanBeSuperseded", all, "a pending-region subcase failed")
 }

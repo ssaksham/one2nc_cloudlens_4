@@ -1,9 +1,9 @@
 package main
 
 import (
-	"strings"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -53,14 +53,15 @@ func manualAfterFailure(h *harness) {
 	}
 	// Break the target, fail to switch, then repair and round-trip.
 	s.rewrite("", "[profile first]\nregion=us-east-1\n[profile second]\nregion=moon-central-1\n")
+	before := s.pane()
 	if good && !s.choose("profile", "second") {
 		good = h.check(id, false, "profile picker did not open")
 	}
 	if good {
-		good = s.awaitText("moon-central-1", 15*time.Second) && s.awaitHeader("first", "eu-west-1", 3*time.Second)
+		good = s.awaitNewText(before, "moon-central-1", 15*time.Second) && s.awaitHeader("first", "eu-west-1", 3*time.Second)
 		h.check(id, good, "failed switch did not preserve the hand-picked region")
 	}
-	s.key("Enter")
+	s.dismissFeedback()
 	time.Sleep(300 * time.Millisecond)
 	s.rewrite("", "[profile first]\nregion=us-east-1\n[profile second]\nregion=eu-west-2\n")
 	if good {
@@ -69,7 +70,7 @@ func manualAfterFailure(h *harness) {
 	if good {
 		good = chooseSettle(h, s, fx, id, "profile", "first", "first", "eu-west-1", "firstKEY", "")
 	}
-	h.check(id, good, "hand-picked region was not restored after a failed switch and round trip")
+	h.verdict(id, good, "hand-picked region was not restored after a failed switch and round trip")
 }
 
 func manualDuringPending(h *harness) {
@@ -92,11 +93,12 @@ func manualDuringPending(h *harness) {
 	if good {
 		good = chooseSettle(h, s, fx.fixture, id, "region", "ap-south-2", "first", "ap-south-2", "firstKEY", "firstTOKEN")
 	}
+	before := s.pane()
 	gates["slow"].open()
 	if good && !awaitGateFinished(gates["slow"]) {
 		good = h.check(id, false, "superseded lookup never finished")
 	}
-	if good && !requireStable(s, "first", "ap-south-2", "slow", 700*time.Millisecond) {
+	if good && !requireStable(s, before, "first", "ap-south-2", "slow", 700*time.Millisecond) {
 		good = h.check(id, false, "superseded lookup had a visible effect")
 	}
 	if good {
@@ -105,7 +107,7 @@ func manualDuringPending(h *harness) {
 	if good {
 		good = chooseSettle(h, s, fx.fixture, id, "profile", "first", "first", "ap-south-2", "firstKEY", "firstTOKEN")
 	}
-	h.check(id, good, "region picked during a pending load was not remembered for the working profile")
+	h.verdict(id, good, "region picked during a pending load was not remembered for the working profile")
 }
 
 func addedWhileOpen(h *harness) {
@@ -132,7 +134,7 @@ func addedWhileOpen(h *harness) {
 	if good {
 		good = chooseSettle(h, s, fx, id, "profile", "first", "first", "us-east-1", "firstKEY", "")
 	}
-	h.check(id, good, "profile added while open was not selectable")
+	h.verdict(id, good, "profile added while open was not selectable")
 }
 
 func regionEditOnSwitch(h *harness) {
@@ -150,7 +152,7 @@ func regionEditOnSwitch(h *harness) {
 	if good {
 		good = chooseSettle(h, s, fx, id, "profile", "second", "second", "eu-central-2", "secondKEY", "")
 	}
-	h.check(id, good, "edited configured region did not apply on switch")
+	h.verdict(id, good, "edited configured region did not apply on switch")
 }
 
 func removedProfile(h *harness) {
@@ -177,12 +179,13 @@ func removedProfile(h *harness) {
 		}
 		s.key("Escape")
 		if opened && offered {
+			before := s.pane()
 			if !s.choose("profile", "second") {
 				good = h.check(id, false, "profile picker did not reopen")
 			} else {
-				good = s.awaitText("second", 15*time.Second)
+				good = s.awaitNewText(before, "second", 15*time.Second)
 				h.check(id, good, "removed profile did not fail by name")
-				s.key("Enter")
+				s.dismissFeedback()
 				time.Sleep(300 * time.Millisecond)
 			}
 		}
@@ -194,7 +197,7 @@ func removedProfile(h *harness) {
 	if good {
 		good = chooseSettle(h, s, fx, id, "profile", "second", "second", "eu-west-2", "secondKEY", "")
 	}
-	h.check(id, good, "removed-profile switch did not fail cleanly and recover")
+	h.verdict(id, good, "removed-profile switch did not fail cleanly and recover")
 }
 
 func malformedOnSwitch(h *harness) {
@@ -211,6 +214,7 @@ func malformedOnSwitch(h *harness) {
 	// Keep a probe file so the harness can confirm the path shown is the
 	// config file (its basename appears in the directory listing too).
 	_ = filepath.Base(s.config)
+	before := s.pane()
 	if good {
 		s.rewrite("", "[profile second\nregion=eu-west-2\n")
 		if !s.choose("profile", "second") {
@@ -218,15 +222,15 @@ func malformedOnSwitch(h *harness) {
 		}
 	}
 	if good {
-		good = s.awaitText("config", 15*time.Second) && s.awaitHeader("first", "us-east-1", 3*time.Second)
+		good = s.awaitNewText(before, "config", 15*time.Second) && s.awaitHeader("first", "us-east-1", 3*time.Second)
 		h.check(id, good, "malformed config on switch did not fail by path on the working session; pane:\n%s", tail(s.pane()))
-		s.key("Enter")
+		s.dismissFeedback()
 		time.Sleep(300 * time.Millisecond)
 	}
 	s.rewrite("", "[profile first]\nregion=us-east-1\n[profile second]\nregion=eu-west-2\n")
 	if good {
 		good = chooseSettle(h, s, fx, id, "profile", "second", "second", "eu-west-2", "secondKEY", "")
 	}
-	h.check(id, good, "malformed-file switch did not fail cleanly and recover")
+	h.verdict(id, good, "malformed-file switch did not fail cleanly and recover")
 	_ = os.Stdout
 }

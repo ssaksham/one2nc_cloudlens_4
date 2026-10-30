@@ -42,16 +42,26 @@ func sameSet(a, b []string) bool {
 }
 
 func runScenarios(h *harness) {
-	h.run("discovery", func() { discoveryScenarios(h) })
-	h.run("regions catalog", func() { regionCatalogScenarios(h) })
-	h.run("command errors", func() { commandErrorScenarios(h) })
-	h.run("initialization errors", func() { initErrorScenarios(h) })
-	h.run("startup", func() { startupScenarios(h) })
-	h.run("switch precedence", func() { precedenceScenarios(h) })
-	h.run("failed switch", func() { failedSwitchScenarios(h) })
-	h.run("localstack", func() { localstackScenarios(h) })
-	h.run("async supersede", func() { asyncScenarios(h) })
-	h.run("live files and remembered regions", func() { liveScenarios(h) })
+	groups := []struct {
+		name string
+		run  func(*harness)
+	}{
+		{"discovery", discoveryScenarios},
+		{"regions catalog", regionCatalogScenarios},
+		{"command errors", commandErrorScenarios},
+		{"initialization errors", initErrorScenarios},
+		{"startup", startupScenarios},
+		{"switch precedence", precedenceScenarios},
+		{"failed switch", failedSwitchScenarios},
+		{"localstack", localstackScenarios},
+		{"async supersede", asyncScenarios},
+		{"live files and remembered regions", liveScenarios},
+	}
+	for _, group := range groups {
+		if !h.run(group.name, group.run) {
+			return
+		}
+	}
 }
 
 // pickerItems opens the profile dropdown and returns its visible items.
@@ -108,7 +118,7 @@ func discoveryCaseStart(h *harness, id, credentials, config string, want []strin
 			}
 		}
 	}
-	h.check(id, true, "")
+	h.verdict(id, true, "")
 }
 
 func wantFirst(want []string, fallback string) string {
@@ -154,7 +164,7 @@ func discoveryScenarios(h *harness) {
 		items, ok := pickerItems(s)
 		want := []string{"alpha", "default", "zebra"}
 		got := filterCandidates(items, want)
-		h.check(awsPkg+"TestGetProfilesSortsCredentialNames", ok && strings.Join(got, ",") == strings.Join(want, ","), "picker order %v, want %v", items, want)
+		h.verdict(awsPkg+"TestGetProfilesSortsCredentialNames", ok && strings.Join(got, ",") == strings.Join(want, ","), "picker order %v, want %v", items, want)
 	} else {
 		h.check(awsPkg+"TestGetProfilesSortsCredentialNames", false, "start: %v", err)
 	}
@@ -195,7 +205,7 @@ func discoveryScenarios(h *harness) {
 		items, ok := pickerItems(s2)
 		want := []string{"override-config", "override-credentials"}
 		got := filterCandidates(items, append(want, "home-config", "home-credentials"))
-		h.check(awsPkg+"TestGetProfilesHonorsBothFileOverrides", ok && sameSet(got, want), "picker opened=%v items %v, want %v; pane:\n%s", ok, items, want, s2.pane())
+		h.verdict(awsPkg+"TestGetProfilesHonorsBothFileOverrides", ok && sameSet(got, want), "picker opened=%v items %v, want %v; pane:\n%s", ok, items, want, s2.pane())
 	} else {
 		h.check(awsPkg+"TestGetProfilesHonorsBothFileOverrides", false, "start: %v", err)
 	}
@@ -225,7 +235,7 @@ func discoveryScenarios(h *harness) {
 			h.check(tc.id, false, "start: %v", err)
 		} else {
 			ok := s.awaitHeader("default", "ap-south-1", 15*time.Second)
-			h.check(tc.id, ok, "empty discovery did not come up on implicit default; pane:\n%s", tail(s.pane()))
+			h.verdict(tc.id, ok, "empty discovery did not come up on implicit default; pane:\n%s", tail(s.pane()))
 			s.close()
 		}
 		fx.close()
@@ -248,7 +258,7 @@ func discoveryScenarios(h *harness) {
 	for _, tc := range malformed {
 		fx := newFixture(nil)
 		out, code := h.runDirect(fx, tc.credentials, tc.config, nil, nil)
-		h.check(tc.id, code != 0 && strings.Contains(out, tc.wantPath) && !strings.Contains(out, "panic:"), "exit=%d output:\n%s", code, tail(out))
+		h.verdict(tc.id, code != 0 && strings.Contains(out, tc.wantPath) && !strings.Contains(out, "panic:"), "exit=%d output:\n%s", code, tail(out))
 		fx.close()
 	}
 	unreadable := []struct {
@@ -271,7 +281,7 @@ func discoveryScenarios(h *harness) {
 		_ = os.Mkdir(filepath.Join(home, tc.dirName), 0o700)
 		_ = writeFile(filepath.Join(home, tc.otherIs), tc.other)
 		out, code := h.runDirectIn(home, fx)
-		h.check(tc.id, code != 0 && strings.Contains(out, tc.wantPath), "exit=%d output:\n%s", code, tail(out))
+		h.verdict(tc.id, code != 0 && strings.Contains(out, tc.wantPath), "exit=%d output:\n%s", code, tail(out))
 		fx.close()
 	}
 
@@ -297,7 +307,7 @@ func discoveryScenarios(h *harness) {
 	defer s3.close()
 	items, ok := pickerItems(s3)
 	_, statErr := os.Stat(marker)
-	h.check(awsPkg+"TestGetProfilesDoesNotExecuteCredentialProcess",
+	h.verdict(awsPkg+"TestGetProfilesDoesNotExecuteCredentialProcess",
 		ok && sameSet(filterCandidates(items, []string{"external", "source"}), []string{"external", "source"}) && os.IsNotExist(statErr),
 		"picker %v, credential_process marker stat err=%v", items, statErr)
 }
@@ -356,9 +366,9 @@ func regionCatalogScenarios(h *harness) {
 			missing = append(missing, sample)
 		}
 	}
-	h.check(awsPkg+"TestGetAllRegionsIncludesBundledAWSRegions", opened && len(missing) == 0 && len(items) >= 30,
+	h.verdict(awsPkg+"TestGetAllRegionsIncludesBundledAWSRegions", opened && len(missing) == 0 && len(items) >= 30,
 		"region picker collected %d items, missing %v", len(items), missing)
-	h.check(awsPkg+"TestGetAllRegionsIncludesNewerCommercialRegions", set["eu-central-2"] && set["ap-south-2"],
+	h.verdict(awsPkg+"TestGetAllRegionsIncludesNewerCommercialRegions", set["eu-central-2"] && set["ap-south-2"],
 		"region picker lacks newer commercial regions in %v", items)
 }
 
@@ -385,11 +395,11 @@ func commandErrorScenarios(h *harness) {
 		fx := newFixture(nil)
 		out, code := h.runDirect(fx, creds, cfg, tc.args, tc.env)
 		ok := code != 0 && strings.Contains(out, tc.want) && !strings.Contains(out, "panic:")
-		h.check(cmdPkg+"TestAWSCommandConfigurationErrors/"+tc.sub, ok, "exit=%d output:\n%s", code, tail(out))
+		h.verdict(cmdPkg+"TestAWSCommandConfigurationErrors/"+tc.sub, ok, "exit=%d output:\n%s", code, tail(out))
 		all = all && ok
 		fx.close()
 	}
-	h.check(cmdPkg+"TestAWSCommandConfigurationErrors", all, "a command error subcase failed")
+	h.verdict(cmdPkg+"TestAWSCommandConfigurationErrors", all, "a command error subcase failed")
 }
 
 func initErrorScenarios(h *harness) {
@@ -413,11 +423,11 @@ func initErrorScenarios(h *harness) {
 		fx := newFixture(nil)
 		out, code := h.runDirect(fx, profileKeys("dev"), tc.config, tc.args, tc.env)
 		ok := code != 0 && strings.Contains(strings.ToLower(out), strings.ToLower(tc.want)) && !strings.Contains(out, "panic:")
-		h.check(viewPkg+"TestAWSInitializationErrors/"+tc.sub, ok, "exit=%d output:\n%s", code, tail(out))
+		h.verdict(viewPkg+"TestAWSInitializationErrors/"+tc.sub, ok, "exit=%d output:\n%s", code, tail(out))
 		all = all && ok
 		fx.close()
 	}
-	h.check(viewPkg+"TestAWSInitializationErrors", all, "an initialization error subcase failed")
+	h.verdict(viewPkg+"TestAWSInitializationErrors", all, "an initialization error subcase failed")
 }
 
 type startupCase struct {
@@ -455,11 +465,12 @@ func startupScenarios(h *harness) {
 			continue
 		}
 		ok := s.awaitState(id, 0, tc.wantProfile, tc.wantRegion, tc.wantKey, "")
+		h.verdict(id, ok, "startup did not reach the expected profile session")
 		all = all && ok
 		s.close()
 		fx.close()
 	}
-	h.check(viewPkg+"TestAWSProfileStartup", all, "a startup subcase failed")
+	h.verdict(viewPkg+"TestAWSProfileStartup", all, "a startup subcase failed")
 
 	// Role profile from config only (STS ungated in the fixture).
 	fx := newFixture(nil)
@@ -469,7 +480,9 @@ func startupScenarios(h *harness) {
 		h.check(viewPkg+"TestAWSRoleProfileFromConfig", false, "start: %v", err)
 	} else {
 		defer s.close()
-		s.awaitState(viewPkg+"TestAWSRoleProfileFromConfig", 0, "sandbox-dev", "eu-central-2", "ROLEKEY", "roletoken")
+		id := viewPkg + "TestAWSRoleProfileFromConfig"
+		ok := s.awaitState(id, 0, "sandbox-dev", "eu-central-2", "ROLEKEY", "roletoken")
+		h.verdict(id, ok, "role profile did not reach the expected session")
 	}
 
 	// Environment-only startup, then a hand-picked region keeps the token.
@@ -502,11 +515,12 @@ func startupScenarios(h *harness) {
 				h.check(sub, ok, "environment session lost its token after region change")
 			}
 		}
+		h.verdict(sub, ok, "environment-only startup and region choice did not succeed")
 		envAll = envAll && ok
 		s.close()
 		fx.close()
 	}
-	h.check(viewPkg+"TestAWSEnvironmentOnlyStartup", envAll, "an environment-only subcase failed")
+	h.verdict(viewPkg+"TestAWSEnvironmentOnlyStartup", envAll, "an environment-only subcase failed")
 }
 
 func precedenceScenarios(h *harness) {
@@ -581,7 +595,7 @@ func precedenceScenarios(h *harness) {
 				h.check(id, false, "did not settle on %s/%s after choosing %s %q; pane:\n%s", step.profile, step.region, step.kind, step.value, tail(s.pane()))
 			}
 		}
-		h.check(id, ok, "precedence sequence failed for %s", override)
+		h.verdict(id, ok, "precedence sequence failed for %s", override)
 		s.close()
 		fx.close()
 	}
@@ -593,7 +607,7 @@ func precedenceScenarios(h *harness) {
 			parentOK = false
 		}
 	}
-	h.check(viewPkg+"TestAWSProfileSwitchRegionPrecedence", parentOK, "a precedence subcase failed")
+	h.verdict(viewPkg+"TestAWSProfileSwitchRegionPrecedence", parentOK, "a precedence subcase failed")
 }
 
 func failedSwitchScenarios(h *harness) {
@@ -620,11 +634,12 @@ func failedSwitchScenarios(h *harness) {
 			s.rewrite("[first]\naws_access_key_id=incomplete\n", "")
 			kind, value, wantErr = "region", "us-east-2", "first"
 		}
+		before := s.pane()
 		if ok && !s.choose(kind, value) {
 			ok = h.check(id, false, "%s picker did not open", kind)
 		}
 		if ok {
-			ok = s.awaitText(wantErr, 15*time.Second)
+			ok = s.awaitNewText(before, wantErr, 15*time.Second)
 			h.check(id, ok, "failed change did not display %q; pane:\n%s", wantErr, tail(s.pane()))
 		}
 		if ok {
@@ -633,7 +648,7 @@ func failedSwitchScenarios(h *harness) {
 		}
 		// Repair and prove the same choice now succeeds.
 		s.rewrite(profileKeys("first", "second"), "[profile first]\nregion=us-east-1\n[profile second]\nregion=eu-west-2\n")
-		s.key("Enter") // dismiss any error modal
+		s.dismissFeedback()
 		time.Sleep(300 * time.Millisecond)
 		if ok {
 			mark := fx.mark()
@@ -653,11 +668,12 @@ func failedSwitchScenarios(h *harness) {
 				ok = h.check(id, false, "profile picker did not reopen")
 			}
 		}
+		h.verdict(id, ok, "failed-switch sequence did not preserve the session and recover")
 		all = all && ok
 		s.close()
 		fx.close()
 	}
-	h.check(viewPkg+"TestAWSFailedSwitchPreservesSession", all, "a failed-switch subcase failed")
+	h.verdict(viewPkg+"TestAWSFailedSwitchPreservesSession", all, "a failed-switch subcase failed")
 }
 
 func localstackScenarios(h *harness) {
@@ -681,10 +697,10 @@ func localstackScenarios(h *harness) {
 			continue
 		}
 		ok := s.awaitHeader("localstack", want, 15*time.Second) && s.awaitRequest(0, signedRequest{"test", want, ""}, 15*time.Second)
-		h.check(sub, ok, "localstack did not settle on %s; pane:\n%s", want, tail(s.pane()))
+		h.verdict(sub, ok, "localstack did not settle on %s; pane:\n%s", want, tail(s.pane()))
 		all = all && ok
 		s.close()
 		fx.close()
 	}
-	h.check(viewPkg+"TestAWSLocalStackSelection", all, "a localstack subcase failed")
+	h.verdict(viewPkg+"TestAWSLocalStackSelection", all, "a localstack subcase failed")
 }
