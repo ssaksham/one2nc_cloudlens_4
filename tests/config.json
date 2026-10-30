@@ -160,7 +160,8 @@
     "node_id": "classname.name",
     "tool_label": "gotestsum",
     "reports": [
-      "/logs/verifier/reports/junit.xml"
+      "/logs/verifier/reports/junit.xml",
+      "/logs/verifier/reports/external-junit.xml"
     ]
   }
 }

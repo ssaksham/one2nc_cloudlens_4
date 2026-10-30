@@ -32,7 +32,7 @@ ENV GOPROXY=off GOFLAGS="-mod=readonly -p=1" GOTOOLCHAIN=local
 
 # The reporter and compiler are trusted image assets, outside submitted code.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 procps util-linux \
+ && apt-get install -y --no-install-recommends python3 procps util-linux tmux \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --create-home --shell /bin/bash verifier-runner
 RUN GOBIN=/opt/bin GOPROXY=https://proxy.golang.org,direct \

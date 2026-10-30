@@ -929,10 +929,10 @@ index 0000000..c38838f
 +}
 diff --git a/internal/view/profile_selection_test.go b/internal/view/profile_selection_test.go
 new file mode 100644
-index 0000000..6880cb0
+index 0000000..cb8418e
 --- /dev/null
 +++ b/internal/view/profile_selection_test.go
-@@ -0,0 +1,529 @@
+@@ -0,0 +1,564 @@
 +package view
 +
 +import (
@@ -1182,14 +1182,49 @@ index 0000000..6880cb0
 +	return update, snapshot
 +}
 +
++// profileOptionList is the behaviour the helpers need from a dropdown's
++// option list. Locating it through this interface, rather than asserting the
++// concrete *tview.List on the focused primitive, keeps the tests grading
++// behaviour when an implementation wraps the list in its own primitive.
++type profileOptionList interface {
++	GetItemCount() int
++	GetItemText(index int) (string, string)
++	SetCurrentItem(index int) *tview.List
++	InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive))
++}
++
++// findProfileOptionList unwraps containers and delegates until it reaches a
++// primitive that behaves as the option list.
++func findProfileOptionList(p tview.Primitive) profileOptionList {
++	switch candidate := p.(type) {
++	case profileOptionList:
++		return candidate
++	case interface{ GetList() *tview.List }:
++		return candidate.GetList()
++	case interface{ GetPrimitive() tview.Primitive }:
++		return findProfileOptionList(candidate.GetPrimitive())
++	case interface {
++		Focus(delegate func(p tview.Primitive))
++	}:
++		var found profileOptionList
++		candidate.Focus(func(inner tview.Primitive) {
++			if found == nil {
++				found = findProfileOptionList(inner)
++			}
++		})
++		return found
++	}
++	return nil
++}
++
 +func selectProfileOptionOnUI(a *App, dropdown, value string) error {
 +	d, ok := a.Views()[dropdown].(*ui.DropDown)
 +	if !ok {
 +		return fmt.Errorf("missing %s dropdown", dropdown)
 +	}
-+	var list *tview.List
++	var list profileOptionList
 +	setFocus := func(p tview.Primitive) {
-+		if candidate, ok := p.(*tview.List); ok {
++		if candidate := findProfileOptionList(p); candidate != nil {
 +			list = candidate
 +		}
 +		a.Application.SetFocus(p)
@@ -1209,10 +1244,10 @@ index 0000000..6880cb0
 +	return fmt.Errorf("%s dropdown lacks %q", dropdown, value)
 +}
 +
-+func openProfileOptions(t *testing.T, a *App, dropdown string) *tview.List {
++func openProfileOptions(t *testing.T, a *App, dropdown string) profileOptionList {
 +	t.Helper()
-+	var list *tview.List
-+	a.Views()[dropdown].(*ui.DropDown).InputHandler()(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone), func(p tview.Primitive) { list, _ = p.(*tview.List) })
++	var list profileOptionList
++	a.Views()[dropdown].(*ui.DropDown).InputHandler()(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone), func(p tview.Primitive) { list = findProfileOptionList(p) })
 +	if list == nil {
 +		t.Fatalf("%s dropdown did not open", dropdown)
 +	}
