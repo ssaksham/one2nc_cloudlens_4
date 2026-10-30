@@ -302,7 +302,10 @@ func (s *session) settleRegion(profile, region string) bool {
 }
 
 func (s *session) listOpen(kind string) bool {
-	pane := s.pane()
+	return listOpenInPane(kind, s.pane())
+}
+
+func listOpenInPane(kind, pane string) bool {
 	if !strings.Contains(pane, "Profile:") {
 		return false // still on the splash screen
 	}
@@ -326,11 +329,31 @@ func (s *session) listOpen(kind string) bool {
 	return false
 }
 
+// Resource refreshes can finish after the selection header appears and move
+// focus again. Observe several draws before acting on an open or closed list,
+// rather than treating one transient pane as an input-ready dropdown.
+func (s *session) awaitListState(kind string, open bool, dur time.Duration) bool {
+	var since time.Time
+	return s.waitFor(dur, func(pane string) bool {
+		if listOpenInPane(kind, pane) != open {
+			since = time.Time{}
+			return false
+		}
+		if since.IsZero() {
+			since = time.Now()
+		}
+		return time.Since(since) >= 200*time.Millisecond
+	})
+}
+
 // openList opens the named dropdown's list. Clicking the field itself opens
 // its list deterministically; Tab cycling is kept as a fallback because a
 // leading Enter or Escape disturbs the page stack, so focus moves first and
 // Escape is only sent to close a list that is actually open.
 func (s *session) openList(kind string) bool {
+	if s.listOpen(kind) && s.awaitListState(kind, true, 500*time.Millisecond) {
+		return true
+	}
 	// Do not burn attempts on the splash screen.
 	s.waitFor(15*time.Second, func(pane string) bool { return strings.Contains(pane, "Profile:") })
 	fieldY := 1 // Profile field is the first pane row.
@@ -344,7 +367,7 @@ func (s *session) openList(kind string) bool {
 			s.key("Tab")
 			time.Sleep(200 * time.Millisecond)
 			s.key("Enter")
-			if s.waitFor(900*time.Millisecond, func(string) bool { return s.listOpen(kind) }) {
+			if s.awaitListState(kind, true, 1500*time.Millisecond) {
 				return true
 			}
 			if len(itemTokens(s.pane())) > 0 {
@@ -355,7 +378,7 @@ func (s *session) openList(kind string) bool {
 	}
 	for attempt := 0; attempt < 3; attempt++ {
 		s.click(15, fieldY)
-		if s.waitFor(900*time.Millisecond, func(string) bool { return s.listOpen(kind) }) {
+		if s.awaitListState(kind, true, 1500*time.Millisecond) {
 			return true
 		}
 		if os.Getenv("EXTGRADE_DEBUG") != "" {
@@ -370,7 +393,7 @@ func (s *session) openList(kind string) bool {
 		s.key("Tab")
 		time.Sleep(200 * time.Millisecond)
 		s.key("Enter")
-		if s.waitFor(900*time.Millisecond, func(string) bool { return s.listOpen(kind) }) {
+		if s.awaitListState(kind, true, 1500*time.Millisecond) {
 			return true
 		}
 		if os.Getenv("EXTGRADE_DEBUG") != "" {
@@ -548,15 +571,30 @@ func (s *session) collectItemsInPlace(kind string) []string {
 // skipped since it displays the current value rather than an item.
 func (s *session) chooseByClick(kind, value string) bool {
 	fieldRow := 0 // Profile field row.
+	reopens := 0
 	find := func() bool {
-		lines := strings.Split(s.pane(), "\n")
+		pane := s.pane()
+		// A resource redraw can close a list after openList returns. Reopen
+		// it a bounded number of times, and locate the row in the same pane
+		// that establishes the list is open. An absent option still fails.
+		for !listOpenInPane(kind, pane) && reopens < 3 {
+			reopens++
+			if !s.openList(kind) {
+				return false
+			}
+			pane = s.pane()
+		}
+		if !listOpenInPane(kind, pane) {
+			return false
+		}
+		lines := strings.Split(pane, "\n")
 		for i, line := range lines {
 			if i == fieldRow {
 				continue
 			}
 			for _, field := range strings.Fields(line) {
 				if field == value {
-					s.beforeChoice = s.pane()
+					s.beforeChoice = pane
 					s.click(15, i+1)
 					return true
 				}
@@ -579,7 +617,7 @@ func (s *session) chooseByClick(kind, value string) bool {
 		time.Sleep(250 * time.Millisecond)
 	}
 	s.key("Escape")
-	fmt.Printf("  [choose] %q not visible among %s items\n", value, kind)
+	fmt.Printf("  [choose] %q not visible among %s items; pane:\n%s\n", value, kind, s.pane())
 	return false
 }
 
@@ -641,6 +679,7 @@ func (s *session) collectItems(kind string) []string {
 		}
 	}
 	s.key("Escape")
+	s.awaitListState(kind, false, 2*time.Second)
 	return out
 }
 

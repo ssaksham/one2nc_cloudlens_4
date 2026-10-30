@@ -129,7 +129,6 @@ func addedWhileOpen(h *harness) {
 		items, opened := pickerItems(s)
 		good = opened && sameSet(filterCandidates(items, []string{"first", "added"}), []string{"first", "added"})
 		h.check(id, good, "picker does not list both profiles: %v", items)
-		s.key("Escape")
 	}
 	if good {
 		good = chooseSettle(h, s, fx, id, "profile", "first", "first", "us-east-1", "firstKEY", "")
@@ -177,7 +176,6 @@ func removedProfile(h *harness) {
 				offered = true
 			}
 		}
-		s.key("Escape")
 		if opened && offered {
 			before := s.pane()
 			if !s.choose("profile", "second") {
