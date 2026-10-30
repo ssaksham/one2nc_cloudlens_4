@@ -217,6 +217,16 @@ func itemTokens(pane string) []string {
 	return out
 }
 
+var errorTextRe = regexp.MustCompile(`(?i)(error|failed|failure|invalid|denied|not found|unavailable|unable)`)
+
+// hasNewErrorText reports whether pane contains error wording that was not
+// already present before the pick, so a pre-existing status line does not
+// make every pick look failed.
+func hasNewErrorText(before, pane string) bool {
+	count := func(text string) int { return len(errorTextRe.FindAllString(text, -1)) }
+	return count(pane) > count(before)
+}
+
 func normalize(text string) string {
 	return strings.Map(func(r rune) rune {
 		if unicode.IsLetter(r) || unicode.IsNumber(r) {
@@ -478,6 +488,7 @@ func (s *session) choose(kind, value string) bool {
 		if s.fx != nil {
 			mark = s.fx.mark()
 		}
+		beforePane := s.pane()
 		s.key("Enter")
 		deadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(deadline) {
@@ -487,8 +498,13 @@ func (s *session) choose(kind, value string) bool {
 			if s.fx != nil && s.fx.mark() > mark {
 				return true
 			}
-			// A failed pick shows the error dialog instead of committing.
-			if strings.Contains(s.pane(), "Dismiss") {
+			// A failed pick reports the error instead of committing. The
+			// reference program uses a Dismiss modal, but an implementation
+			// may surface the same failure through its flash/status channel
+			// or by pinning the field to the last working value, so any
+			// new error text in the pane also counts as the pick entered.
+			pane := s.pane()
+			if strings.Contains(pane, "Dismiss") || hasNewErrorText(beforePane, pane) {
 				return true
 			}
 			time.Sleep(100 * time.Millisecond)
