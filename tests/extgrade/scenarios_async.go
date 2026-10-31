@@ -307,6 +307,9 @@ func pendingRegion(h *harness) {
 					if pending && !s.awaitHeader("current", "eu-west-2", 2*time.Second) {
 						good = h.check(sub, false, "committed selection moved while region lookup was pending")
 					}
+					if good && !pending && !s.waitHeader("current", "us-west-2", 500*time.Millisecond) {
+						good = h.check(sub, false, "region choice neither requested credentials nor completed")
+					}
 				}
 				profile, region, key, token, kind, value := "current", "ap-south-2", "currentKEY", "currentTOKEN", "region", "ap-south-2"
 				if target == "profile" {

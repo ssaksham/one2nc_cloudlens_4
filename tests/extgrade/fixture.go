@@ -86,6 +86,10 @@ func parseSigned(r *http.Request) signedRequest {
 
 const ec2Response = `<DescribeInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>local</requestId><reservationSet/></DescribeInstancesResponse>`
 
+// Checking who a loaded profile is, is a reasonable way to validate it, so
+// the fixture answers STS GetCallerIdentity as well.
+const callerIdentityResponse = `<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><GetCallerIdentityResult><Arn>arn:aws:iam::123456789012:user/local</Arn><UserId>LOCALUSER</UserId><Account>123456789012</Account></GetCallerIdentityResult><ResponseMetadata><RequestId>local</RequestId></ResponseMetadata></GetCallerIdentityResponse>`
+
 func roleResponse(key, token string) string {
 	return `<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><AssumeRoleResult><Credentials><AccessKeyId>` + key + `</AccessKeyId><SecretAccessKey>rolesecret</SecretAccessKey><SessionToken>` + token + `</SessionToken><Expiration>2099-01-01T00:00:00Z</Expiration></Credentials><AssumedRoleUser><Arn>arn:aws:sts::123456789012:assumed-role/dev/session</Arn><AssumedRoleId>role:session</AssumedRoleId></AssumedRoleUser></AssumeRoleResult></AssumeRoleResponse>`
 }
@@ -127,6 +131,10 @@ func (f *fixture) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		fmt.Fprint(w, roleResponse(role+"KEY", role+"TOKEN"))
+		return
+	}
+	if r.Form.Get("Action") == "GetCallerIdentity" {
+		fmt.Fprint(w, callerIdentityResponse)
 		return
 	}
 	fmt.Fprint(w, ec2Response)

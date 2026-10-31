@@ -244,6 +244,14 @@ func (s *session) awaitHeader(profile, region string, dur time.Duration) bool {
 	})
 }
 
+// awaitProfileHeader waits, without judging, until the header shows profile,
+// then lets the startup load settle before the caller opens a picker.
+func (s *session) awaitProfileHeader(profile string, dur time.Duration) bool {
+	ok := s.waitFor(dur, func(pane string) bool { return headerValue(profileHeaderRe, pane) == profile })
+	time.Sleep(500 * time.Millisecond)
+	return ok
+}
+
 func (s *session) awaitText(value string, dur time.Duration) bool {
 	want := normalize(value)
 	return s.waitFor(dur, func(pane string) bool {
@@ -464,16 +472,29 @@ func (s *session) choose(kind, value string) bool {
 	if kind == "profile" {
 		return s.chooseByClick(kind, value)
 	}
-	if !s.listOpen(kind) {
-		return true // the click that opened the list also committed it
+	// Something can close the list after openList saw it open; open it again
+	// rather than treating that as a pick.
+	if !s.listOpen(kind) && !s.openList(kind) {
+		return false
 	}
 	// The list opens scrolled to the top with its first item current, so
-	// learn the full order once, then step down to the target.
-	items := s.collectItemsInPlace(kind)
+	// learn the full order once, then step down to the target. Work finishing
+	// in the background can close the list while it is read; read it again
+	// then, and only judge a list that stayed open.
+	var items []string
 	index := -1
-	for i, item := range items {
-		if item == value {
-			index = i
+	for read := 0; read < 3 && index < 0; read++ {
+		if !s.listOpen(kind) && !s.openList(kind) {
+			return false
+		}
+		items = s.collectItemsInPlace(kind)
+		for i, item := range items {
+			if item == value {
+				index = i
+				break
+			}
+		}
+		if index < 0 && s.listOpen(kind) {
 			break
 		}
 	}
@@ -515,6 +536,10 @@ func (s *session) choose(kind, value string) bool {
 		}
 		beforePane := s.pane()
 		s.beforeChoice = beforePane
+		// A list that closed during the steps lost the keys; start again.
+		if !listOpenInPane(kind, beforePane) {
+			continue
+		}
 		s.key("Enter")
 		deadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(deadline) {
@@ -531,6 +556,11 @@ func (s *session) choose(kind, value string) bool {
 			// new error text in the pane also counts as the pick entered.
 			pane := s.pane()
 			if strings.Contains(pane, "Dismiss") || hasNewErrorText(beforePane, pane) || hasNewNamedText(beforePane, pane, value) {
+				return true
+			}
+			// Enter on an open list selects its highlighted item and closes
+			// it, whatever the outcome looks like; the scenario judges that.
+			if !listOpenInPane(kind, pane) && s.awaitListState(kind, false, 300*time.Millisecond) {
 				return true
 			}
 			time.Sleep(100 * time.Millisecond)

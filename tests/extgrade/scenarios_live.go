@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,6 +177,9 @@ func removedProfile(h *harness) {
 				offered = true
 			}
 		}
+		if !opened {
+			good = h.check(id, false, "profile picker did not open after the profile was removed")
+		}
 		if opened && offered {
 			before := s.pane()
 			if !s.choose("profile", "second") {
@@ -231,4 +235,73 @@ func malformedOnSwitch(h *harness) {
 	}
 	h.verdict(id, good, "malformed-file switch did not fail cleanly and recover")
 	_ = os.Stdout
+}
+
+func keyboardScenarios(h *harness) {
+	keyboardPick(h)
+}
+
+// keyboardPick adds a profile while the program runs, opens the profile picker
+// from the keyboard, steps down to the new profile with the arrow keys and
+// commits it with Enter. The list opens on the working profile, which sorts
+// first. Each attempt starts a fresh program, so a highlight left behind by an
+// earlier attempt cannot carry over.
+func keyboardPick(h *harness) {
+	id := viewPkg + "TestAWSProfilePickerKeyboardSelection"
+	good, detail := false, ""
+	for attempt := 0; attempt < 3 && !good; attempt++ {
+		good, detail = keyboardPickOnce(h)
+		if !good {
+			fmt.Printf("  [attempt %d] %s\n", attempt+1, detail)
+		}
+	}
+	h.verdict(id, good, "%s", detail)
+}
+
+func keyboardPickOnce(h *harness) (bool, string) {
+	fx := newFixture(nil)
+	defer fx.close()
+	s, err := h.start(fx, profileKeys("first", "second"), "[profile first]\nregion=us-east-1\n[profile second]\nregion=eu-west-2\n", []string{"-p", "first"}, nil, false)
+	if err != nil {
+		return false, fmt.Sprintf("start: %v", err)
+	}
+	defer s.close()
+	// Let the startup load finish so it cannot move focus mid-sequence.
+	if !s.awaitHeader("first", "us-east-1", 15*time.Second) || !s.awaitRequest(0, signedRequest{"firstKEY", "us-east-1", ""}, 15*time.Second) {
+		return false, "did not start on first/us-east-1; pane:\n" + tail(s.pane())
+	}
+	s.rewrite(profileKeys("first", "second", "third"), "[profile first]\nregion=us-east-1\n[profile second]\nregion=eu-west-2\n[profile third]\nregion=eu-central-2\n")
+	// Startup work that finishes after the first request can still move
+	// focus once, which would close a list opened too early.
+	time.Sleep(2500 * time.Millisecond)
+	if !s.openList("profile") {
+		return false, "profile picker did not open from the keyboard"
+	}
+	items := s.visibleItems("profile")
+	from, to := -1, -1
+	for i, item := range items {
+		switch item {
+		case "first":
+			from = i
+		case "third":
+			to = i
+		}
+	}
+	if from < 0 || to < from {
+		s.key("Escape")
+		return false, fmt.Sprintf("open profile picker lists %v, want first before third", items)
+	}
+	mark := fx.mark()
+	for step := from; step < to; step++ {
+		s.key("Down")
+		time.Sleep(80 * time.Millisecond)
+	}
+	if !s.listOpen("profile") {
+		return false, "profile picker closed while its highlight was being moved"
+	}
+	s.key("Enter")
+	if s.awaitHeader("third", "eu-central-2", 10*time.Second) && s.awaitRequest(mark, signedRequest{"thirdKEY", "eu-central-2", ""}, 10*time.Second) {
+		return true, ""
+	}
+	return false, fmt.Sprintf("arrow keys and Enter in the open profile picker %v did not switch to third/eu-central-2; pane:\n%s", items, tail(s.pane()))
 }

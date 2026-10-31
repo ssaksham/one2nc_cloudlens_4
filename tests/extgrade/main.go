@@ -98,6 +98,8 @@ func (h *harness) run(name string, fn func(*harness)) bool {
 		return true
 	}
 	fmt.Printf("[extgrade] %s\n", name)
+	started := time.Now()
+	defer func() { fmt.Printf("[extgrade] %s took %s\n", name, time.Since(started).Round(time.Second)) }()
 	defer h.flush()
 	group := &harness{
 		bin: h.bin, work: h.work, runner: h.runner, timeout: h.timeout,

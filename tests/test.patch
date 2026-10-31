@@ -315,10 +315,10 @@ index 0000000..c61d4b7
 +}
 diff --git a/internal/view/profile_async_selection_test.go b/internal/view/profile_async_selection_test.go
 new file mode 100644
-index 0000000..2b0c0e4
+index 0000000..3c7a141
 --- /dev/null
 +++ b/internal/view/profile_async_selection_test.go
-@@ -0,0 +1,447 @@
+@@ -0,0 +1,462 @@
 +package view
 +
 +import (
@@ -429,7 +429,7 @@ index 0000000..2b0c0e4
 +	mark := log.mark()
 +	update(func() error { return selectProfileOptionOnUI(a, dropdown, value) })
 +	awaitProfileSelection(t, a, update, profile, region, key)
-+	update(func() error { requireSortedRegionOptions(t, a); return nil })
++	update(func() error { return requireSortedRegionOptions(t, a) })
 +	requireSignedProfileRequest(t, log, mark, key, region, token)
 +}
 +
@@ -570,6 +570,10 @@ index 0000000..2b0c0e4
 +			if flush, ok := w.(http.Flusher); ok {
 +				flush.Flush()
 +			}
++			return
++		}
++		if r.Form.Get("Action") == "GetCallerIdentity" {
++			fmt.Fprint(w, profileCallerIdentity)
 +			return
 +		}
 +		f.requests.record(r)
@@ -761,6 +765,17 @@ index 0000000..2b0c0e4
 +						awaitProfileSignal(t, old.finished, "superseded region response or cancellation")
 +					}
 +					requireStableProfile(t, a, update, render, before, profile, region, key, "us-west-2")
++					if !pending {
++						return
++					}
++					// Only the region choice that committed is remembered for
++					// "current": the superseded us-west-2 pick never is.
++					remembered := "eu-west-2"
++					if target == "region" {
++						remembered = "ap-south-2"
++						selectAndAwaitProfile(t, a, update, f.requests, "profile", "second", "second", "eu-central-2", "secondKEY", "secondTOKEN")
++					}
++					selectAndAwaitProfile(t, a, update, f.requests, "profile", "current", "current", remembered, "currentKEY", "currentTOKEN")
 +				})
 +			})
 +		}
@@ -768,18 +783,18 @@ index 0000000..2b0c0e4
 +}
 diff --git a/internal/view/profile_live_selection_test.go b/internal/view/profile_live_selection_test.go
 new file mode 100644
-index 0000000..c38838f
+index 0000000..5ad03b9
 --- /dev/null
 +++ b/internal/view/profile_live_selection_test.go
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,207 @@
 +package view
 +
 +import (
-+	"strings"
++	"fmt"
 +	"testing"
 +
-+	"github.com/derailed/tview"
 +	"github.com/gdamore/tcell/v2"
++	"github.com/one2nc/cloudlens/internal/ui"
 +)
 +
 +// A region picked by hand is remembered for the profile it was picked under,
@@ -846,13 +861,9 @@ index 0000000..c38838f
 +		// The picker must now advertise both profiles.
 +		var listed []string
 +		update(func() error {
-+			list := openProfileOptions(t, a, "profile")
-+			for index := 0; index < list.GetItemCount(); index++ {
-+				text, _ := list.GetItemText(index)
-+				listed = append(listed, strings.TrimSpace(text))
-+			}
-+			list.InputHandler()(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone), func(tview.Primitive) {})
-+			return nil
++			var err error
++			listed, err = profileOptionsOnUI(a, "profile")
++			return err
 +		})
 +		if len(listed) != 2 {
 +			t.Fatalf("profile picker = %v, want first and added", listed)
@@ -887,15 +898,13 @@ index 0000000..c38838f
 +		// cleanly, or an already-refreshed picker must no longer offer it.
 +		offered := false
 +		update(func() error {
-+			list := openProfileOptions(t, a, "profile")
-+			for index := 0; index < list.GetItemCount(); index++ {
-+				text, _ := list.GetItemText(index)
-+				if strings.TrimSpace(text) == "second" {
++			options, err := profileOptionsOnUI(a, "profile")
++			for _, option := range options {
++				if option == "second" {
 +					offered = true
 +				}
 +			}
-+			list.InputHandler()(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone), func(tview.Primitive) {})
-+			return nil
++			return err
 +		})
 +		if offered {
 +			update(func() error { return selectProfileOptionOnUI(a, "profile", "second") })
@@ -927,12 +936,70 @@ index 0000000..c38838f
 +		selectAndAwaitProfile(t, a, update, f.requests, "profile", "second", "second", "eu-west-2", "secondKEY", "")
 +	})
 +}
++
++// Opening the profile picker re-reads the shared files, and the open list still
++// works from the keyboard: the arrow keys move its highlight and Enter switches
++// to the highlighted profile. Every key travels as the event loop delivers it,
++// one key per UI turn so the screen is drawn in between.
++func TestAWSProfilePickerKeyboardSelection(t *testing.T) {
++	isolatedProfileCase(t, func() {
++		f := profileFiles(t, profileKeys("first", "second"), "[profile first]\nregion=us-east-1\n[profile second]\nregion=eu-west-2\n")
++		a := startProfileApp(t, "first", "")
++		update, _ := startProfileEventLoop(t, a)
++		requireSignedProfileRequest(t, f.requests, 0, "firstKEY", "us-east-1", "")
++		writeProfileFile(t, f.credentials, profileKeys("first", "second", "third"))
++		writeProfileFile(t, f.configuration, "[profile first]\nregion=us-east-1\n[profile second]\nregion=eu-west-2\n[profile third]\nregion=eu-central-2\n")
++		mark := f.requests.mark()
++		press := func(key tcell.Key) {
++			update(func() error { pressAppKey(a, key, appSetFocus(a)); return nil })
++		}
++		var field *ui.DropDown
++		update(func() error {
++			var ok bool
++			if field, ok = a.Views()["profile"].(*ui.DropDown); !ok {
++				return fmt.Errorf("missing profile dropdown")
++			}
++			a.Application.SetFocus(field)
++			return nil
++		})
++		press(tcell.KeyEnter)
++		// The list opens on the working profile; count the steps down to "third".
++		steps := 0
++		update(func() error {
++			picker := a.Application.GetFocus()
++			if picker == nil || picker.GetFocusable() == field.GetFocusable() {
++				return fmt.Errorf("profile dropdown did not open")
++			}
++			items := profilePickerItems(a, picker)
++			from, to := -1, -1
++			for index, item := range items {
++				switch item {
++				case "first":
++					from = index
++				case "third":
++					to = index
++				}
++			}
++			if from < 0 || to < from {
++				return fmt.Errorf("profile picker = %v, want first listed before third", items)
++			}
++			steps = to - from
++			return nil
++		})
++		for ; steps > 0; steps-- {
++			press(tcell.KeyDown)
++		}
++		press(tcell.KeyEnter)
++		awaitProfileSelection(t, a, update, "third", "eu-central-2", "thirdKEY")
++		requireSignedProfileRequest(t, f.requests, mark, "thirdKEY", "eu-central-2", "")
++	})
++}
 diff --git a/internal/view/profile_selection_test.go b/internal/view/profile_selection_test.go
 new file mode 100644
-index 0000000..cb8418e
+index 0000000..845630d
 --- /dev/null
 +++ b/internal/view/profile_selection_test.go
-@@ -0,0 +1,564 @@
+@@ -0,0 +1,646 @@
 +package view
 +
 +import (
@@ -948,6 +1015,8 @@ index 0000000..cb8418e
 +	"strings"
 +	"testing"
 +	"time"
++	"unicode"
++	"unicode/utf8"
 +
 +	awsSDK "github.com/aws/aws-sdk-go-v2/aws"
 +	"github.com/derailed/tview"
@@ -1014,6 +1083,10 @@ index 0000000..cb8418e
 +			fmt.Fprint(w, `<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><AssumeRoleResult><Credentials><AccessKeyId>ROLEKEY</AccessKeyId><SecretAccessKey>rolesecret</SecretAccessKey><SessionToken>roletoken</SessionToken><Expiration>2099-01-01T00:00:00Z</Expiration></Credentials><AssumedRoleUser><Arn>arn:aws:sts::123456789012:assumed-role/dev/session</Arn><AssumedRoleId>role:session</AssumedRoleId></AssumedRoleUser></AssumeRoleResult></AssumeRoleResponse>`)
 +			return
 +		}
++		if r.Form.Get("Action") == "GetCallerIdentity" {
++			fmt.Fprint(w, profileCallerIdentity)
++			return
++		}
 +		f.requests.record(r)
 +		fmt.Fprint(w, `<DescribeInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><requestId>local</requestId><reservationSet/></DescribeInstancesResponse>`)
 +	}))
@@ -1022,6 +1095,10 @@ index 0000000..cb8418e
 +	t.Setenv("AWS_ENDPOINT_URL_STS", server.URL)
 +	return f
 +}
++
++// Checking who a loaded profile is, is a reasonable way to validate it, so the
++// local endpoint answers STS GetCallerIdentity as well.
++const profileCallerIdentity = `<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><GetCallerIdentityResult><Arn>arn:aws:iam::123456789012:user/local</Arn><UserId>LOCALUSER</UserId><Account>123456789012</Account></GetCallerIdentityResult><ResponseMetadata><RequestId>local</RequestId></ResponseMetadata></GetCallerIdentityResponse>`
 +
 +func writeProfileFile(t *testing.T, path, contents string) {
 +	t.Helper()
@@ -1102,7 +1179,9 @@ index 0000000..cb8418e
 +
 +func requireProfileState(t *testing.T, a *App, profile, region, key string) {
 +	t.Helper()
-+	requireSortedRegionOptions(t, a)
++	if err := requireSortedRegionOptions(t, a); err != nil {
++		t.Fatal(err)
++	}
 +	state, err := profileSelectionSnapshot(a)
 +	if err != nil {
 +		t.Fatal(err)
@@ -1182,106 +1261,172 @@ index 0000000..cb8418e
 +	return update, snapshot
 +}
 +
-+// profileOptionList is the behaviour the helpers need from a dropdown's
-+// option list. Locating it through this interface, rather than asserting the
-+// concrete *tview.List on the focused primitive, keeps the tests grading
-+// behaviour when an implementation wraps the list in its own primitive.
-+type profileOptionList interface {
++// A picker is driven the way a user drives it. Its field is focused unless it
++// already has focus, and Enter opens it the way the event loop delivers keys.
++// Keys for the open list then go to the primitive the dropdown handed focus to,
++// with focus changes going through the application. Options are read from that
++// primitive's list when it has one and otherwise from what it draws, so a picker
++// that wraps its option list in its own primitive is used through its own key
++// handling.
++type profileItemList interface {
 +	GetItemCount() int
 +	GetItemText(index int) (string, string)
-+	SetCurrentItem(index int) *tview.List
-+	InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive))
 +}
 +
-+// findProfileOptionList unwraps containers and delegates until it reaches a
-+// primitive that behaves as the option list.
-+func findProfileOptionList(p tview.Primitive) profileOptionList {
-+	switch candidate := p.(type) {
-+	case profileOptionList:
-+		return candidate
-+	case interface{ GetList() *tview.List }:
-+		return candidate.GetList()
-+	case interface{ GetPrimitive() tview.Primitive }:
-+		return findProfileOptionList(candidate.GetPrimitive())
-+	case interface {
-+		Focus(delegate func(p tview.Primitive))
-+	}:
-+		var found profileOptionList
-+		candidate.Focus(func(inner tview.Primitive) {
-+			if found == nil {
-+				found = findProfileOptionList(inner)
-+			}
-+		})
-+		return found
-+	}
-+	return nil
++func appSetFocus(a *App) func(tview.Primitive) {
++	return func(p tview.Primitive) { a.Application.SetFocus(p) }
 +}
 +
-+func selectProfileOptionOnUI(a *App, dropdown, value string) error {
-+	d, ok := a.Views()[dropdown].(*ui.DropDown)
-+	if !ok {
-+		return fmt.Errorf("missing %s dropdown", dropdown)
++func pressProfileKey(a *App, target tview.Primitive, key tcell.Key) {
++	if handler := target.InputHandler(); handler != nil {
++		handler(tcell.NewEventKey(key, 0, tcell.ModNone), appSetFocus(a))
 +	}
-+	var list profileOptionList
-+	setFocus := func(p tview.Primitive) {
-+		if candidate := findProfileOptionList(p); candidate != nil {
-+			list = candidate
-+		}
-+		a.Application.SetFocus(p)
-+	}
-+	a.Application.SetFocus(d)
-+	d.InputHandler()(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone), setFocus)
-+	if list == nil {
-+		return fmt.Errorf("%s dropdown did not open", dropdown)
-+	}
-+	for index := 0; index < list.GetItemCount(); index++ {
-+		if text, _ := list.GetItemText(index); strings.TrimSpace(text) == value {
-+			list.SetCurrentItem(index)
-+			list.InputHandler()(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone), setFocus)
-+			return nil
-+		}
-+	}
-+	return fmt.Errorf("%s dropdown lacks %q", dropdown, value)
 +}
 +
-+func openProfileOptions(t *testing.T, a *App, dropdown string) profileOptionList {
-+	t.Helper()
-+	var list profileOptionList
-+	a.Views()[dropdown].(*ui.DropDown).InputHandler()(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone), func(p tview.Primitive) { list = findProfileOptionList(p) })
-+	if list == nil {
-+		t.Fatalf("%s dropdown did not open", dropdown)
-+	}
-+	return list
-+}
-+
-+func selectProfileOption(t *testing.T, a *App, dropdown, value string) {
-+	t.Helper()
-+	list := openProfileOptions(t, a, dropdown)
-+	for index := 0; index < list.GetItemCount(); index++ {
-+		if text, _ := list.GetItemText(index); strings.TrimSpace(text) == value {
-+			list.SetCurrentItem(index)
-+			list.InputHandler()(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone), func(tview.Primitive) {})
++// pressAppKey delivers a key as the event loop does: through the application's
++// input capture, then from the root down to the focused widget.
++func pressAppKey(a *App, key tcell.Key, setFocus func(tview.Primitive)) {
++	event := tcell.NewEventKey(key, 0, tcell.ModNone)
++	if capture := a.Application.GetInputCapture(); capture != nil {
++		if event = capture(event); event == nil {
 +			return
 +		}
 +	}
-+	t.Fatalf("%s dropdown lacks %q", dropdown, value)
++	if a.Main.HasFocus() {
++		if handler := a.Main.InputHandler(); handler != nil {
++			handler(event, setFocus)
++		}
++	}
 +}
 +
-+func requireSortedRegionOptions(t *testing.T, a *App) {
-+	t.Helper()
-+	list := openProfileOptions(t, a, "region")
-+	var options []string
-+	seen := map[string]bool{}
-+	for index := 0; index < list.GetItemCount(); index++ {
-+		text, _ := list.GetItemText(index)
-+		text = strings.TrimSpace(text)
-+		if seen[text] {
-+			t.Errorf("duplicate region option %q", text)
-+		}
-+		seen[text] = true
-+		options = append(options, text)
++func openProfilePicker(a *App, dropdown string) (tview.Primitive, error) {
++	d, ok := a.Views()[dropdown].(*ui.DropDown)
++	if !ok {
++		return nil, fmt.Errorf("missing %s dropdown", dropdown)
 +	}
-+	list.InputHandler()(tcell.NewEventKey(tcell.KeyEscape, 0, tcell.ModNone), func(tview.Primitive) {})
++	field := d.GetFocusable()
++	if focused := a.Application.GetFocus(); focused == nil || focused.GetFocusable() != field {
++		a.Application.SetFocus(d)
++	}
++	var opened tview.Primitive
++	pressAppKey(a, tcell.KeyEnter, func(p tview.Primitive) {
++		if p != nil && p.GetFocusable() != field {
++			opened = p
++		}
++		a.Application.SetFocus(p)
++	})
++	focused := a.Application.GetFocus()
++	if opened == nil {
++		opened = focused
++	}
++	if opened == nil || opened.GetFocusable() == field {
++		return nil, fmt.Errorf("%s dropdown did not open", dropdown)
++	}
++	// Focus may since have moved on into a list inside what opening focused.
++	if _, ok := opened.(profileItemList); !ok && focused != nil && focused.GetFocusable() != field {
++		if _, ok := focused.(profileItemList); ok {
++			opened = focused
++		}
++	}
++	return opened, nil
++}
++
++// Borders are drawn with box-drawing characters. Only vertical ones share a
++// row with an option; any other leads a border row, which may carry a title.
++func profileBoxDrawing(r rune) bool { return r >= '\u2500' && r <= '\u257f' }
++
++func profileVerticalBorder(r rune) bool { return r == '\u2502' || r == '\u2503' || r == '\u2551' }
++
++// profilePickerItems lists the open picker's options in display order. A
++// picker read from its drawing is moved to its first option beforehand, so no
++// option is scrolled out of view.
++func profilePickerItems(a *App, picker tview.Primitive) []string {
++	if list, ok := picker.(profileItemList); ok {
++		items := make([]string, list.GetItemCount())
++		for index := range items {
++			text, _ := list.GetItemText(index)
++			items[index] = strings.TrimSpace(text)
++		}
++		return items
++	}
++	pressProfileKey(a, picker, tcell.KeyHome)
++	const width, height = 160, 256
++	screen := tcell.NewSimulationScreen("UTF-8")
++	if err := screen.Init(); err != nil {
++		return nil
++	}
++	defer screen.Fini()
++	screen.SetSize(width, height)
++	x, y, w, h := picker.GetRect()
++	picker.SetRect(0, 0, width, height)
++	picker.Draw(screen)
++	picker.SetRect(x, y, w, h)
++	var items []string
++	for row := 0; row < height; row++ {
++		var line strings.Builder
++		for column := 0; column < width; column++ {
++			char, _, _, _ := screen.GetContent(column, row)
++			line.WriteRune(char)
++		}
++		text := strings.TrimFunc(line.String(), func(r rune) bool {
++			return unicode.IsSpace(r) || profileVerticalBorder(r)
++		})
++		if first, _ := utf8.DecodeRuneInString(text); text == "" || profileBoxDrawing(first) {
++			continue
++		}
++		items = append(items, text)
++	}
++	return items
++}
++
++func selectProfileOptionOnUI(a *App, dropdown, value string) error {
++	picker, err := openProfilePicker(a, dropdown)
++	if err != nil {
++		return err
++	}
++	for index, item := range profilePickerItems(a, picker) {
++		if item != value {
++			continue
++		}
++		if list, ok := picker.(interface{ SetCurrentItem(int) *tview.List }); ok {
++			list.SetCurrentItem(index)
++		} else {
++			pressProfileKey(a, picker, tcell.KeyHome)
++			for step := 0; step < index; step++ {
++				pressProfileKey(a, picker, tcell.KeyDown)
++			}
++		}
++		pressProfileKey(a, picker, tcell.KeyEnter)
++		return nil
++	}
++	pressProfileKey(a, picker, tcell.KeyEscape)
++	return fmt.Errorf("%s dropdown lacks %q", dropdown, value)
++}
++
++// profileOptionsOnUI opens a picker, reads its options and closes it with Escape.
++func profileOptionsOnUI(a *App, dropdown string) ([]string, error) {
++	picker, err := openProfilePicker(a, dropdown)
++	if err != nil {
++		return nil, err
++	}
++	items := profilePickerItems(a, picker)
++	pressProfileKey(a, picker, tcell.KeyEscape)
++	return items, nil
++}
++
++func requireSortedRegionOptions(t *testing.T, a *App) error {
++	t.Helper()
++	options, err := profileOptionsOnUI(a, "region")
++	if err != nil {
++		return err
++	}
++	seen := map[string]bool{}
++	for _, option := range options {
++		if seen[option] {
++			t.Errorf("duplicate region option %q", option)
++		}
++		seen[option] = true
++	}
 +	expected := cloudAWS.GetAllRegions()
 +	if len(options) != len(expected) {
 +		t.Errorf("region menu has %d entries, want %d", len(options), len(expected))
@@ -1294,6 +1439,7 @@ index 0000000..cb8418e
 +	if !sort.StringsAreSorted(options) {
 +		t.Errorf("region dropdown is not sorted: %v", options)
 +	}
++	return nil
 +}
 +
 +func TestAWSProfileStartup(t *testing.T) {
@@ -1469,6 +1615,9 @@ index 0000000..cb8418e
 +				writeProfileFile(t, f.configuration, "[profile first]\nregion=us-east-1\n[profile second]\nregion=eu-west-2\n")
 +				update(func() error { dismissProfileError(a); return nil })
 +				selectAndAwaitProfile(t, a, update, f.requests, "profile", "second", "second", "eu-west-2", "secondKEY", "")
++				// The failed choice left nothing behind: switching back opens
++				// "first" in its configured region, not a region that failed.
++				selectAndAwaitProfile(t, a, update, f.requests, "profile", "first", "first", "us-east-1", "firstKEY", "")
 +			})
 +		})
 +	}

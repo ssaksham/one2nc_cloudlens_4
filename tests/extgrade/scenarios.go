@@ -56,6 +56,7 @@ func runScenarios(h *harness) {
 		{"localstack", localstackScenarios},
 		{"async supersede", asyncScenarios},
 		{"live files and remembered regions", liveScenarios},
+		{"keyboard picker", keyboardScenarios},
 	}
 	for _, group := range groups {
 		if !h.run(group.name, group.run) {
@@ -98,7 +99,7 @@ func discoveryCaseStart(h *harness, id, credentials, config string, want []strin
 		if boot == "" {
 			boot = want[0]
 		}
-		s.awaitHeader(boot, "", 15*time.Second)
+		s.awaitProfileHeader(boot, 15*time.Second)
 	}
 	items, ok := pickerItems(s)
 	if !ok {
@@ -201,7 +202,7 @@ func discoveryScenarios(h *harness) {
 		defer s2.close()
 		_ = writeFile(filepath.Join(s2.home, ".aws", "credentials"), "[home-credentials]\naws_access_key_id = ignored\n")
 		_ = writeFile(filepath.Join(s2.home, ".aws", "config"), "[profile home-config]\nregion = us-east-1\n")
-		s2.awaitHeader("override-credentials", "", 15*time.Second)
+		s2.awaitProfileHeader("override-credentials", 15*time.Second)
 		items, ok := pickerItems(s2)
 		want := []string{"override-config", "override-credentials"}
 		got := filterCandidates(items, append(want, "home-config", "home-credentials"))

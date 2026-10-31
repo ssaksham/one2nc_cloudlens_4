@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // hasNewNamedText compares rendered lines rather than matching an error
@@ -49,13 +50,30 @@ func (s *session) awaitNewText(before, value string, dur time.Duration) bool {
 	})
 }
 
-// A flash/status message needs no confirmation. Sending Enter to it can
-// reopen the focused dropdown and accidentally make a second selection.
+// A flash/status message needs no confirmation. An error dialog is dismissed
+// by clicking its button, which works whether or not the dialog took focus:
+// Enter sent to a dialog without focus would reach the focused dropdown and
+// open it instead. Enter is only a fallback for a dialog that ignores clicks.
 func (s *session) dismissFeedback() {
-	if strings.Contains(s.pane(), "Dismiss") {
-		s.key("Enter")
-	} else if s.listOpen("profile") || s.listOpen("region") {
-		s.key("Escape")
+	gone := func(pane string) bool { return !strings.Contains(pane, "Dismiss") }
+	for row, line := range strings.Split(s.pane(), "\n") {
+		if col := strings.Index(line, "Dismiss"); col >= 0 {
+			// tview reports a click within 500ms of the previous one as a
+			// double-click, which buttons ignore.
+			time.Sleep(600 * time.Millisecond)
+			s.click(utf8.RuneCountInString(line[:col])+4, row+1)
+			if !s.waitFor(time.Second, gone) {
+				s.key("Enter")
+				s.waitFor(time.Second, gone)
+			}
+			break
+		}
+	}
+	for _, kind := range []string{"profile", "region"} {
+		if s.listOpen(kind) {
+			s.key("Escape")
+			s.awaitListState(kind, false, 2*time.Second)
+		}
 	}
 	time.Sleep(300 * time.Millisecond)
 }
