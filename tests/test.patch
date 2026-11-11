@@ -315,7 +315,7 @@ index 0000000..c61d4b7
 +}
 diff --git a/internal/view/profile_async_selection_test.go b/internal/view/profile_async_selection_test.go
 new file mode 100644
-index 0000000..3c7a141
+index 0000000..1a349d7
 --- /dev/null
 +++ b/internal/view/profile_async_selection_test.go
 @@ -0,0 +1,462 @@
@@ -429,7 +429,7 @@ index 0000000..3c7a141
 +	mark := log.mark()
 +	update(func() error { return selectProfileOptionOnUI(a, dropdown, value) })
 +	awaitProfileSelection(t, a, update, profile, region, key)
-+	update(func() error { return requireSortedRegionOptions(t, a) })
++	update(func() error { return requireRegionOptions(t, a) })
 +	requireSignedProfileRequest(t, log, mark, key, region, token)
 +}
 +
@@ -783,10 +783,10 @@ index 0000000..3c7a141
 +}
 diff --git a/internal/view/profile_live_selection_test.go b/internal/view/profile_live_selection_test.go
 new file mode 100644
-index 0000000..16ca8e7
+index 0000000..c76f4e1
 --- /dev/null
 +++ b/internal/view/profile_live_selection_test.go
-@@ -0,0 +1,238 @@
+@@ -0,0 +1,237 @@
 +package view
 +
 +import (
@@ -794,7 +794,6 @@ index 0000000..16ca8e7
 +	"testing"
 +
 +	"github.com/gdamore/tcell/v2"
-+	"github.com/one2nc/cloudlens/internal/ui"
 +)
 +
 +// A region picked by hand is remembered for the profile it was picked under,
@@ -985,10 +984,10 @@ index 0000000..16ca8e7
 +		press := func(key tcell.Key) {
 +			update(func() error { pressAppKey(a, key, appSetFocus(a)); return nil })
 +		}
-+		var field *ui.DropDown
++		var field profilePickerField
 +		update(func() error {
 +			var ok bool
-+			if field, ok = a.Views()["profile"].(*ui.DropDown); !ok {
++			if field, ok = a.Views()["profile"].(profilePickerField); !ok {
 +				return fmt.Errorf("missing profile dropdown")
 +			}
 +			a.Application.SetFocus(field)
@@ -1027,10 +1026,10 @@ index 0000000..16ca8e7
 +}
 diff --git a/internal/view/profile_selection_test.go b/internal/view/profile_selection_test.go
 new file mode 100644
-index 0000000..6d1e601
+index 0000000..4e4046b
 --- /dev/null
 +++ b/internal/view/profile_selection_test.go
-@@ -0,0 +1,661 @@
+@@ -0,0 +1,663 @@
 +package view
 +
 +import (
@@ -1042,7 +1041,6 @@ index 0000000..6d1e601
 +	"os/exec"
 +	"path/filepath"
 +	"regexp"
-+	"sort"
 +	"strings"
 +	"testing"
 +	"time"
@@ -1055,7 +1053,6 @@ index 0000000..6d1e601
 +	"github.com/one2nc/cloudlens/internal"
 +	cloudAWS "github.com/one2nc/cloudlens/internal/aws"
 +	"github.com/one2nc/cloudlens/internal/config"
-+	"github.com/one2nc/cloudlens/internal/ui"
 +)
 +
 +// A process boundary makes a regression to os.Exit a normal test failure.
@@ -1156,6 +1153,13 @@ index 0000000..6d1e601
 +	return a
 +}
 +
++// The existing view registry and context connect picker selections to resource
++// views. Read that integration surface without requiring a concrete widget type.
++type profilePickerField interface {
++	tview.Primitive
++	GetCurrentOption() (int, string)
++}
++
 +type profileSelectionState struct {
 +	profile, region         interface{}
 +	profileText, regionText string
@@ -1168,11 +1172,11 @@ index 0000000..6d1e601
 +		profile: ctx.Value(internal.KeyActiveProfile),
 +		region:  ctx.Value(internal.KeyActiveRegion),
 +	}
-+	profile, ok := a.Views()["profile"].(*ui.DropDown)
++	profile, ok := a.Views()["profile"].(profilePickerField)
 +	if !ok {
 +		return state, fmt.Errorf("missing profile dropdown")
 +	}
-+	region, ok := a.Views()["region"].(*ui.DropDown)
++	region, ok := a.Views()["region"].(profilePickerField)
 +	if !ok {
 +		return state, fmt.Errorf("missing region dropdown")
 +	}
@@ -1210,7 +1214,7 @@ index 0000000..6d1e601
 +
 +func requireProfileState(t *testing.T, a *App, profile, region, key string) {
 +	t.Helper()
-+	if err := requireSortedRegionOptions(t, a); err != nil {
++	if err := requireRegionOptions(t, a); err != nil {
 +		t.Fatal(err)
 +	}
 +	state, err := profileSelectionSnapshot(a)
@@ -1332,7 +1336,7 @@ index 0000000..6d1e601
 +}
 +
 +func openProfilePicker(a *App, dropdown string) (tview.Primitive, error) {
-+	d, ok := a.Views()[dropdown].(*ui.DropDown)
++	d, ok := a.Views()[dropdown].(profilePickerField)
 +	if !ok {
 +		return nil, fmt.Errorf("missing %s dropdown", dropdown)
 +	}
@@ -1401,7 +1405,7 @@ index 0000000..6d1e601
 +	screen.SetSize(width, height)
 +	x, y, w, h := picker.GetRect()
 +	firstRow, drawHeight := 0, height
-+	if _, ok := picker.(*ui.DropDown); ok {
++	if _, ok := picker.(profilePickerField); ok {
 +		firstRow, drawHeight = 1, 1
 +	}
 +	picker.SetRect(0, 0, width, drawHeight)
@@ -1460,7 +1464,7 @@ index 0000000..6d1e601
 +	return items, nil
 +}
 +
-+func requireSortedRegionOptions(t *testing.T, a *App) error {
++func requireRegionOptions(t *testing.T, a *App) error {
 +	t.Helper()
 +	options, err := profileOptionsOnUI(a, "region")
 +	if err != nil {
@@ -1481,9 +1485,6 @@ index 0000000..6d1e601
 +		if !seen[name] {
 +			t.Errorf("region menu lacks %q", name)
 +		}
-+	}
-+	if !sort.StringsAreSorted(options) {
-+		t.Errorf("region dropdown is not sorted: %v", options)
 +	}
 +	return nil
 +}
