@@ -235,7 +235,73 @@ func removedProfile(h *harness) {
 	if good {
 		good = chooseSettle(h, s, fx, id, "profile", "second", "second", "eu-west-2", "secondKEY", "")
 	}
+	if good {
+		good = removedProfileMouseReopen(h, id)
+	}
 	h.verdict(id, good, "removed-profile switch did not fail cleanly and recover")
+}
+
+// Exercise restoration through the mouse as well as the keyboard flow above.
+// Startup navigation may preserve the open menu or close it; either is valid,
+// but the next visible opening must discover the files again.
+func removedProfileMouseReopen(h *harness, id string) bool {
+	fx := newFixture(nil)
+	defer fx.close()
+	credentials := profileKeys("first", "second")
+	config := "[profile first]\nregion=us-east-1\n[profile second]\nregion=eu-west-2\n"
+	s, err := h.start(fx, credentials, config, []string{"-p", "first"}, nil, false)
+	if err != nil {
+		return h.check(id, false, "mouse restoration start: %v", err)
+	}
+	defer s.close()
+	if !s.awaitHeader("first", "us-east-1", 15*time.Second) {
+		return h.check(id, false, "mouse restoration startup did not finish")
+	}
+	openByMouse := func() bool {
+		for i := 0; i < 3; i++ {
+			if s.listOpen("profile") && s.awaitListState("profile", true, 1500*time.Millisecond) {
+				return true
+			}
+			s.click(15, 1)
+			if s.awaitListState("profile", true, 1500*time.Millisecond) {
+				return true
+			}
+		}
+		return false
+	}
+	s.rewrite(profileKeys("first"), "[profile first]\nregion=us-east-1\n")
+	if !openByMouse() {
+		return h.check(id, false, "profile picker did not open by mouse after removal; pane:\n%s", s.pane())
+	}
+	// The existing delayed startup page switch can move focus after the first
+	// header appears. Wait through it without requiring any particular focus
+	// behavior, then close a menu only if it is still visibly open.
+	time.Sleep(1200 * time.Millisecond)
+	if s.listOpen("profile") {
+		s.key("Escape")
+	}
+	if !s.awaitListState("profile", false, 3*time.Second) {
+		return h.check(id, false, "profile picker did not visibly close before restoration; pane:\n%s", s.pane())
+	}
+	s.rewrite(credentials, config)
+	for read := 0; read < 3; read++ {
+		if !openByMouse() {
+			return h.check(id, false, "profile picker did not reopen by mouse after restoration; pane:\n%s", s.pane())
+		}
+		// Read the existing menu across scrolls so a short viewport is valid.
+		// If a later draw hides it, observe another opening before judging
+		// absence; an open menu with stale options must still fail.
+		items := s.collectItemsInPlace("profile")
+		for _, item := range items {
+			if item == "second" {
+				return true
+			}
+		}
+		if s.listOpen("profile") {
+			return h.check(id, false, "restored profile missing from newly opened picker after startup: items=%v; pane:\n%s", items, s.pane())
+		}
+	}
+	return h.check(id, false, "profile picker repeatedly closed while reading restored profiles; pane:\n%s", s.pane())
 }
 
 func malformedOnSwitch(h *harness) {
