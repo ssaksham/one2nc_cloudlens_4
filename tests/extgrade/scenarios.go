@@ -283,6 +283,7 @@ func discoveryScenarios(h *harness) {
 		_ = writeFile(filepath.Join(home, tc.otherIs), tc.other)
 		out, code := h.runDirectIn(home, fx)
 		h.verdict(tc.id, code != 0 && strings.Contains(out, tc.wantPath), "exit=%d output:\n%s", code, tail(out))
+		_ = os.RemoveAll(home)
 		fx.close()
 	}
 
@@ -294,6 +295,7 @@ func discoveryScenarios(h *harness) {
 		h.check(awsPkg+"TestGetProfilesDoesNotExecuteCredentialProcess", false, "%v", err)
 		return
 	}
+	defer os.RemoveAll(home)
 	marker := filepath.Join(home, "credentials-were-executed")
 	helper := filepath.Join(home, "credentials-helper")
 	script := "#!/bin/sh\nprintf invoked > '" + marker + "'\nprintf '%s' '{\"Version\":1,\"AccessKeyId\":\"PROCESSKEY\",\"SecretAccessKey\":\"secret\"}'\n"

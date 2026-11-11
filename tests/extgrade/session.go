@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 )
@@ -68,6 +70,12 @@ func (h *harness) start(fx *fixture, credentials, config string, args []string, 
 		return nil, err
 	}
 	s := &session{h: h, name: fmt.Sprintf("xg%d", sessionSeq), home: home, fx: fx, credentials: filepath.Join(home, "credentials"), config: filepath.Join(home, "config")}
+	started := false
+	defer func() {
+		if !started {
+			s.close()
+		}
+	}()
 	if useHomeDefaults {
 		s.credentials = filepath.Join(home, ".aws", "credentials")
 		s.config = filepath.Join(home, ".aws", "config")
@@ -124,11 +132,13 @@ func (h *harness) start(fx *fixture, credentials, config string, args []string, 
 	if out, err := tmux.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("start tmux: %v: %s", err, out)
 	}
+	started = true
 	return s, nil
 }
 
 func (s *session) close() {
 	_ = exec.Command("tmux", "-L", s.name, "kill-server").Run()
+	_ = os.RemoveAll(s.home)
 }
 
 func (s *session) rewrite(credentials, config string) {
@@ -714,18 +724,17 @@ func (s *session) collectItems(kind string) []string {
 }
 
 func execOutput(name string, argv []string, dir string) (string, int) {
-	done := make(chan struct{})
-	var out []byte
-	var runErr error
-	go func() {
-		defer close(done)
-		cmd := exec.Command(name, argv...)
-		cmd.Dir = dir
-		out, runErr = cmd.CombinedOutput()
-	}()
-	select {
-	case <-done:
-	case <-time.After(20 * time.Second):
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, argv...)
+	cmd.Dir = dir
+	// runuser may own the direct child. Kill its whole process group before
+	// returning, so a timed-out program cannot keep its removed HOME alive.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = time.Second
+	out, runErr := cmd.CombinedOutput()
+	if ctx.Err() != nil {
 		return string(out) + "\n(timeout)", -1
 	}
 	code := 0
@@ -746,6 +755,7 @@ func (h *harness) runDirect(fx *fixture, credentials, config string, args []stri
 	if err != nil {
 		return err.Error(), -1
 	}
+	defer os.RemoveAll(home)
 	credPath, cfgPath := filepath.Join(home, "credentials"), filepath.Join(home, "config")
 	_ = writeFile(credPath, credentials)
 	_ = writeFile(cfgPath, config)
@@ -778,27 +788,5 @@ func (h *harness) runDirect(fx *fixture, credentials, config string, args []stri
 		name = "runuser"
 		argv = append([]string{"-u", h.runner, "--"}, argv...)
 	}
-	done := make(chan struct{})
-	var out []byte
-	var runErr error
-	go func() {
-		defer close(done)
-		cmd := exec.Command(name, argv...)
-		cmd.Dir = home
-		out, runErr = cmd.CombinedOutput()
-	}()
-	select {
-	case <-done:
-	case <-time.After(20 * time.Second):
-		return string(out) + "\n(timeout)", -1
-	}
-	code := 0
-	if runErr != nil {
-		if ee, ok := runErr.(*exec.ExitError); ok {
-			code = ee.ExitCode()
-		} else {
-			code = -1
-		}
-	}
-	return string(out), code
+	return execOutput(name, argv, home)
 }
