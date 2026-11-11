@@ -58,6 +58,7 @@
     "github.com/one2nc/cloudlens/internal/view.TestAWSPendingRegionCanBeSuperseded/profile_old_failure_true",
     "github.com/one2nc/cloudlens/internal/view.TestAWSPendingRegionCanBeSuperseded/region_old_failure_false",
     "github.com/one2nc/cloudlens/internal/view.TestAWSPendingRegionCanBeSuperseded/region_old_failure_true",
+    "github.com/one2nc/cloudlens/internal/view.TestAWSProfileAddedAfterEnvironmentOnlyStartup",
     "github.com/one2nc/cloudlens/internal/view.TestAWSProfileAddedWhileOpenIsSelectable",
     "github.com/one2nc/cloudlens/internal/view.TestAWSProfilePickerKeyboardSelection",
     "github.com/one2nc/cloudlens/internal/view.TestAWSProfileRegionEditAppliesOnSwitch",

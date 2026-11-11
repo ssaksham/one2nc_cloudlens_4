@@ -783,10 +783,10 @@ index 0000000..3c7a141
 +}
 diff --git a/internal/view/profile_live_selection_test.go b/internal/view/profile_live_selection_test.go
 new file mode 100644
-index 0000000..d31087d
+index 0000000..16ca8e7
 --- /dev/null
 +++ b/internal/view/profile_live_selection_test.go
-@@ -0,0 +1,206 @@
+@@ -0,0 +1,238 @@
 +package view
 +
 +import (
@@ -869,6 +869,38 @@ index 0000000..d31087d
 +			t.Fatalf("profile picker = %v, want first and added", listed)
 +		}
 +		selectAndAwaitProfile(t, a, update, f.requests, "profile", "first", "first", "us-east-1", "firstKEY", "")
++	})
++}
++
++// Live discovery also applies after an environment-only startup. A newly
++// created named profile must use its own credentials instead of the startup
++// environment credentials, including the environment's session token.
++func TestAWSProfileAddedAfterEnvironmentOnlyStartup(t *testing.T) {
++	isolatedProfileCase(t, func() {
++		f := profileFiles(t, "", "")
++		t.Setenv("AWS_ACCESS_KEY_ID", "ENVKEY")
++		t.Setenv("AWS_SECRET_ACCESS_KEY", "envsecret")
++		t.Setenv("AWS_SESSION_TOKEN", "envtoken")
++		a := startProfileApp(t, "", "")
++		update, _ := startProfileEventLoop(t, a)
++		requireSignedProfileRequest(t, f.requests, 0, "ENVKEY", "ap-south-1", "envtoken")
++		assertCommittedProfile(t, a, update, "default", "ap-south-1", "ENVKEY")
++
++		writeProfileFile(t, f.credentials, profileKeys("added"))
++		writeProfileFile(t, f.configuration, "[profile added]\nregion=eu-central-2\n")
++		update(func() error {
++			items, err := profileOptionsOnUI(a, "profile")
++			if err != nil {
++				return err
++			}
++			for _, item := range items {
++				if item == "added" {
++					return nil
++				}
++			}
++			return fmt.Errorf("profile picker = %v, missing profile added after environment-only startup", items)
++		})
++		selectAndAwaitProfile(t, a, update, f.requests, "profile", "added", "added", "eu-central-2", "addedKEY", "")
 +	})
 +}
 +

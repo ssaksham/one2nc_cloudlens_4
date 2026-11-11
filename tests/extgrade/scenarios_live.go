@@ -33,6 +33,7 @@ func liveScenarios(h *harness) {
 	manualAfterFailure(h)
 	manualDuringPending(h)
 	addedWhileOpen(h)
+	addedAfterEnvironmentOnlyStartup(h)
 	regionEditOnSwitch(h)
 	removedProfile(h)
 	malformedOnSwitch(h)
@@ -135,6 +136,41 @@ func addedWhileOpen(h *harness) {
 		good = chooseSettle(h, s, fx, id, "profile", "first", "first", "us-east-1", "firstKEY", "")
 	}
 	h.verdict(id, good, "profile added while open was not selectable")
+}
+
+func addedAfterEnvironmentOnlyStartup(h *harness) {
+	id := viewPkg + "TestAWSProfileAddedAfterEnvironmentOnlyStartup"
+	fx := newFixture(nil)
+	defer fx.close()
+	env := map[string]string{
+		"AWS_ACCESS_KEY_ID":     "ENVKEY",
+		"AWS_SECRET_ACCESS_KEY": "envsecret",
+		"AWS_SESSION_TOKEN":     "envtoken",
+	}
+	s, err := h.start(fx, "", "", nil, env, false)
+	if err != nil {
+		h.check(id, false, "start: %v", err)
+		return
+	}
+	defer s.close()
+	good := s.awaitState(id, 0, "default", "ap-south-1", "ENVKEY", "envtoken")
+	if good {
+		s.rewrite(profileKeys("added"), "[profile added]\nregion=eu-central-2\n")
+		items, opened := pickerItems(s)
+		found := false
+		for _, item := range items {
+			if item == "added" {
+				found = true
+			}
+		}
+		good = h.check(id, opened && found, "profile picker = %v, missing profile added after environment-only startup", items)
+	}
+	if good {
+		// Environment credentials remain set: selecting the new profile must
+		// replace both the access key and the environment's session token.
+		good = chooseSettle(h, s, fx, id, "profile", "added", "added", "eu-central-2", "addedKEY", "")
+	}
+	h.verdict(id, good, "profile added after environment-only startup was not selectable with its own credentials and configured region")
 }
 
 func regionEditOnSwitch(h *harness) {

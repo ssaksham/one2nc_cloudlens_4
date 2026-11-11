@@ -482,7 +482,7 @@ index 4e340d1..779e0eb 100644
  
  func NewDropDown(label string, options []string) *DropDown {
 diff --git a/internal/view/app.go b/internal/view/app.go
-index a09fe09..872d198 100644
+index a09fe09..5ed6490 100644
 --- a/internal/view/app.go
 +++ b/internal/view/app.go
 @@ -6,10 +6,9 @@ import (
@@ -755,7 +755,7 @@ index a09fe09..872d198 100644
  func (a *App) GetContext() context.Context {
  	return a.context
  }
-@@ -415,8 +459,25 @@ func (a *App) helpCmd(evt *tcell.EventKey) *tcell.EventKey {
+@@ -415,8 +459,21 @@ func (a *App) helpCmd(evt *tcell.EventKey) *tcell.EventKey {
  }
  
  func (a *App) profileChanged(profile string, index int) {
@@ -765,13 +765,9 @@ index a09fe09..872d198 100644
 +		return
 +	}
 +	request := a.beginAWSSelection()
-+	profiles, err := a.refreshAWSProfiles()
++	envOnly, err := a.prepareAWSProfile(profile)
 +	if err != nil {
 +		a.failAWSSelection(request, err)
-+		return
-+	}
-+	if !a.cloudConfig.UseLocalStack && !a.awsEnvOnly && optionIndex(profiles, profile) < 0 {
-+		a.failAWSSelection(request, fmt.Errorf("could not load AWS profile %q: profile not found", profile))
 +		return
 +	}
 +	region, err := a.awsSwitchRegion(profile)
@@ -779,11 +775,11 @@ index a09fe09..872d198 100644
 +		a.failAWSSelection(request, err)
 +		return
 +	}
-+	a.loadAWSSelection(request, profile, region)
++	a.loadAWSSelection(request, profile, region, envOnly)
  }
  
  func (a *App) projectchanged(project string, index int) {
-@@ -428,28 +489,19 @@ func (a *App) zonechanged(zone string, index int) {
+@@ -428,28 +485,24 @@ func (a *App) zonechanged(zone string, index int) {
  }
  
  func (a *App) regionChanged(region string, index int) {
@@ -802,10 +798,15 @@ index a09fe09..872d198 100644
  	}
 -	cfg, err := aws.GetCfg(awsConfigInput)
 -	//sess, err := aws.GetSession(profile, region)
--	if err != nil {
--		a.App.Flash().Err(err)
 +	request := a.beginAWSSelection()
 +	if err := validateAWSRegion(region); err != nil {
++		a.failAWSSelection(request, err)
++		return
++	}
++	profile := a.GetContext().Value(internal.KeyActiveProfile).(string)
++	envOnly, err := a.prepareAWSProfile(profile)
+ 	if err != nil {
+-		a.App.Flash().Err(err)
 +		a.failAWSSelection(request, err)
  		return
  	}
@@ -814,15 +815,14 @@ index a09fe09..872d198 100644
 -	stackedViews := a.Content.Pages.Stack.Flatten()
 -	a.gotoResource(stackedViews[0], "", true)
 -	a.App.Flash().Infof("Refreshing %v...", stackedViews[0])
-+	profile := a.GetContext().Value(internal.KeyActiveProfile).(string)
 +	// The choice binds to the working profile, even if another profile load
 +	// is still pending; it is remembered only once it actually commits.
 +	a.awsManualRegionFor = profile
-+	a.loadAWSSelection(request, profile, region)
++	a.loadAWSSelection(request, profile, region, envOnly)
  }
  
  func (a *App) refreshProject(project string) {
-@@ -531,41 +583,3 @@ func (a *App) zone() *ui.DropDown {
+@@ -531,41 +584,3 @@ func (a *App) zone() *ui.DropDown {
  func (a *App) region() *ui.DropDown {
  	return a.Views()["region"].(*ui.DropDown)
  }
@@ -866,10 +866,10 @@ index a09fe09..872d198 100644
 -}
 diff --git a/internal/view/aws_selection.go b/internal/view/aws_selection.go
 new file mode 100644
-index 0000000..0b8cb2d
+index 0000000..c1d3a26
 --- /dev/null
 +++ b/internal/view/aws_selection.go
-@@ -0,0 +1,241 @@
+@@ -0,0 +1,257 @@
 +package view
 +
 +import (
@@ -1008,10 +1008,10 @@ index 0000000..0b8cb2d
 +	dialog.ShowError(a.Main, err.Error())
 +}
 +
-+func (a *App) loadAWSSelection(request awsSelectionRequest, profile, region string) {
++func (a *App) loadAWSSelection(request awsSelectionRequest, profile, region string, envOnly bool) {
 +	input := aws.AWSConfigInput{
 +		UseLocalStack:   a.cloudConfig.UseLocalStack,
-+		UseEnvVariables: a.awsEnvOnly,
++		UseEnvVariables: envOnly,
 +		Profile:         profile,
 +		Region:          region,
 +	}
@@ -1028,6 +1028,7 @@ index 0000000..0b8cb2d
 +				a.failAWSSelection(request, fmt.Errorf("load AWS profile %q in region %q: %w", profile, region, err))
 +				return
 +			}
++			a.awsEnvOnly = envOnly
 +			a.commitAWSSelection(cfg, profile, region)
 +			request.cancel()
 +			a.awsSelectionCancel = nil
@@ -1056,9 +1057,6 @@ index 0000000..0b8cb2d
 +	if err != nil {
 +		return nil, err
 +	}
-+	if a.awsEnvOnly {
-+		profiles = []string{"default"}
-+	}
 +	options := profiles
 +	if working, _ := a.GetContext().Value(internal.KeyActiveProfile).(string); optionIndex(options, working) < 0 {
 +		// tview reads the current option right after a selection callback
@@ -1074,6 +1072,24 @@ index 0000000..0b8cb2d
 +	a.updatingAWSSelection = false
 +	a.restoreAWSSelection()
 +	return profiles, nil
++}
++
++// Environment credentials belong to the implicit session, not to every future
++// choice. Once shared profiles appear, selecting one loads its own credentials.
++// Determine the mode for this request without changing the working session.
++func (a *App) prepareAWSProfile(profile string) (bool, error) {
++	profiles, err := a.refreshAWSProfiles()
++	if err != nil {
++		return false, err
++	}
++	if a.cloudConfig.UseLocalStack {
++		return false, nil
++	}
++	envOnly := a.awsEnvOnly && profile == "default" && len(profiles) == 0
++	if !envOnly && optionIndex(profiles, profile) < 0 {
++		return false, fmt.Errorf("could not load AWS profile %q: profile not found", profile)
++	}
++	return envOnly, nil
 +}
 +
 +// Region for a profile switch: the startup precedence, except that a region
